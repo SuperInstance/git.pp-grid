@@ -1,131 +1,117 @@
-# git.pp-grid — the shared month, as a grid
+# The Grid — one engine, many grids
 
-**Live:** https://gitpp-grid.casey-digennaro.workers.dev
+**Live: https://gitpp-grid.casey-digennaro.workers.dev** (leads with the on-call instance; the custody instance is at `/?instance=custody`)
 
-Built 2026-10-13 to play-test, touchably, the scheduling fiction
-from Casey's design session that day: two people sharing
-responsibility for a kid discover that a chat thread cannot hold a
-calendar — "that Monday" slides, subtext evaporates, and nobody can
-tell which version of a day is standing. A shared grid can, if it is
-built like the rest of git.pp: a default that derives, a record that
-accumulates, and renderings that know where their viewer sits.
+A shared grid where reference is spatial and absolute. The first
+build of this was a custody calendar, and the correction that
+produced this repo was: *truly general purpose — custody schedules
+aren't going to get it for engineers.* So the custody calendar is
+now **one instance of a general engine**, and an engineering
+instance leads. Instances are config; the engine doesn't know what
+a kid or a service is.
 
-Mara and Jonas (the demo parents) are fictional. The pattern is the
-point.
+## The engine
 
-## The fiction, implemented as specified
+Named as such in `src/engine.ts`, because this is what it is:
 
-- **A default that stands unless changed.** Alternating weeks,
-  handover Fridays 18:00, the week of Friday Oct 2 2026 is Mara's.
-  The rule is *data* — stated in plain words at the top of the page —
-  and the whole month derives from it. Silence inherits: no
-  proposal, no change, no conversation needed. A day's color is who
-  has the kid that night; soccer practice stands Tue/Thu 17:00.
-- **An append-only record.** Every entry has an id, a timestamp, an
-  author seat, a kind (`proposal`, `accept`, `reject`, `counter`,
-  `question`, `comment`, `event`, `rule-note`), target days, a
-  payload, and — where the fiction demands it — a reason. Nothing is
-  edited or deleted; a rejection keeps its reason attached forever.
-- **Cells with insides (the Plato rule).** A day's face shows a
-  value. Clicking opens the box: the *description* (what the default
-  says, what stands now and why it moved) and the *equation* (every
-  record that touched the day, rejections struck through, reasons
-  attached). A cell that can explain itself.
-- **Proposals wear a color.** Proposing renders the day amber-
-  hatched — visibly *pending*, not fact — and dings the other seat's
-  inbox. The resolution moves are **accept** (lands as a record; the
-  grid re-derives), **reject** (a reason is required, enforced
-  server-side), **counter** (a linked new proposal; the original is
-  marked countered), and **question / comment** — first-class,
-  because some proposals are honestly "not sure yet — waiting to
-  hear back" (the seed's pending proposal on Oct 26 is exactly that,
-  and it is flagged *tentative*).
-- **Seats are renderings — the X factor.** Four seats, one record:
-  **Mara** and **Jonas** get the whole grid and their own inboxes.
-  **Coach** gets only game/practice days and snack duty — computed
-  by a *server-side projection*; the payload never contains
-  responsibility data at all (the playtest greps it). **Agent** gets
-  no grid at all: a need-to-know list of dings for its human. Same
-  record, rendered for where you sit — the mechanic watches the
-  gauges with a different eye than the captain, and the deckhand
-  has only been told a few details.
-- **Pull, don't push.** Each parent seat gets **Pull my days**: an
-  .ics of their responsibility days, their events on those days, and
-  their duties/opt-ins wherever they fall — a copy to carry to a
-  phone calendar, never a write back. No seat can write into another
-  seat's anything; the only way in is the port (the action endpoints,
-  which append records and enforce the fiction: you cannot rule on
-  your own proposal).
-- **Re-fold.** A control discards the derived grid and re-derives it
-  from the log alone, showing the state digest before/after.
+- **Cells** — a keyed space (rows × days here). A cell holds one
+  standing value (a person, or null — a gap) plus annotations.
+- **A default rule as data** — a declared rotation per row,
+  anchored to a date. The standing grid is *derived* from it,
+  never stored as facts. Silence inherits: if nobody proposes
+  anything, the default is simply what happens.
+- **An append-only record** — authored, reasoned entries. Nothing
+  is edited or deleted; a rejection keeps its reason attached
+  forever because the fold reads the whole log, always.
+- **Proposals** — pending deltas against cells, rendered as a
+  *color*, not a fact. Five moves: propose, accept,
+  reject (a reason is **required**, enforced server-side),
+  counter, question/comment (first class — some proposals are
+  honestly "not sure yet"). A proposal lands only when *another*
+  seat's accept enters the record. You cannot rule on your own.
+- **Freezes** — declared windows over cells. A frozen cell renders
+  locked; a proposal against it must **name the freeze** in its
+  note or the port refuses it.
+- **Seats** — server-side projections of the same record:
+  *person* (the grid at their scope), *scoped* (only cells
+  carrying chosen event kinds — the rest is **absent** from the
+  payload, not hidden), *aggregate* (counts and gaps only, no
+  names at all), *agent* (a need-to-know list of dings), *pager*
+  (a machine pull: one row, the next 72 hours).
+- **Ports** — pull, don't push. The only way in is appending a
+  record through a declared action; the way out is a pull
+  artefact (`.ics` / JSON) generated from the fold.
+- **Cell insides** — every cell opens: the *description* (what the
+  default says, what stands now, any freeze) and the *equation*
+  (every record that touched the cell, reasons attached).
+- **Re-fold** — the derived grid is a cache over default + record.
+  Discard it and re-fold: the sha256 digest must come back
+  identical, or something other than the record was carrying
+  the truth.
 
-## The honest label
+## The instances (config in `src/instances.ts`)
 
-The record here lives in this instance's own store (a Cloudflare
-Durable Object, via the Agents SDK) — the page says so, in an
-amber-bordered card: *an instance with the same operational
-fiction*, **not** the git.pp substrate. What is under test is the
-shape: default + record → grid → per-seat renderings. The sibling
-artefact, [git.pp-desk](https://github.com/SuperInstance/git.pp-desk),
-runs the same doctrine over real git records.
+**On-call rotation** (lead) — services (api, billing, ingest,
+search) × days; a weekly rotation per service; a Billing v2 launch
+freeze (Oct 19–23). Seats: four engineers scoped to their own
+rotation's services, a team lead (all services + inbox), a
+**director** (per-service coverage, gaps and pending counts —
+literally no names in the payload), and a **pager** (machine pull
+of one service's next 72h, `.ics` or JSON). The seed month is
+mid-story: an accepted swap, a swap rejected *because* "that's the
+launch freeze", an accepted drop that leaves Oct 31 on search
+uncovered, and a pending coverage ask with the lead's question
+standing on it.
 
-## The seed month (October 2026)
+**The shared month** (custody) — two parents, one kid, alternating
+weeks from Friday Oct 2, soccer standing Tue/Thu. Seats: both
+parents, a **coach** who receives only soccer/snack days (no
+responsibility field exists in that payload), and an **agent**
+seat (dings only). This is the original demo, re-expressed as
+engine config — its playtests are the regression suite.
 
-The record opens already lived-in: the rule as a rule-note; a soccer
-game and Jonas's snack duty on Sat Oct 17; an **accepted** swap
-(Jonas's work trip: Oct 12 ↔ Oct 19 — so the 12th is Mara's, the 19th
-Jonas's, both off-default); a **rejected** Halloween proposal with
-its reason ("Hosting my parents that weekend — I can't do Halloween
-solo…"); and a **pending tentative** proposal on Oct 26 with Mara's
-unanswered question attached. The first screen tells the story
-before you touch anything.
-
-## Playtest (2026-10-13, against the live deployment)
-
-Run it yourself: `node test/playtest.mjs`. Check 1 folds the record
-*in the test*, from the spec, over the raw log — the server never
-grades itself.
+## Layout
 
 ```
-PASS  1a. server grid == independent fold of default+record (all 31 days) — 31/31 days agree
-PASS  1b. five probe days match the seed story, hand-computed — {2026-10-01: jonas, 2026-10-12: mara, 2026-10-19: jonas, 2026-10-26: jonas, 2026-10-31: mara}
-PASS  2a. propose appends exactly one entry — log 10 → 11
-PASS  2b. a pending proposal is a color, not a fact (day unmoved, proposal shown) — responsible=mara, pending=1
-PASS  2c. accept appends exactly one entry and the day lands — log 11 → 12, 2026-10-06 = jonas
-PASS  3. reject keeps the day at default, reason retrievable in the box — log 12 → 14, 2026-10-07 = mara, history has the reason
-PASS  4. coach payload: game days present, responsibility data absent
-PASS  6a. mara's pull: has her swapped-in Oct 12, not her swapped-out Oct 19
-PASS  6b. jonas's pull: exactly inverse, plus his snack duty on Mara's day
-PASS  5. re-fold digest identical (the record alone carries the grid) — over 14 records
-PASS  7. page serves the claim, the rule, and the seats
-
-All checks passed.
+src/engine.ts     the engine: fold, projections, pulls, digest (no instance vocabulary)
+src/instances.ts  the instances: ON-CALL + CUSTODY configs and their seed records
+src/index.ts      the host: one Durable Object (Agents SDK) per instance, the port's guards, HTTP front door
+src/page.ts       one generic page, rendered per instance from its config
+test/playtest.mjs the acceptance test — folds the raw record independently, per instance
 ```
 
-Port guards probed separately, live: ruling on your own proposal is
-refused ("it waits for the other seat"); a rejection with an empty
-reason is refused ("it stays attached forever"); a counter marks the
-original `countered` and stands as the live proposal. After the
-playtest, the demo record was reset to its seed — and the grid
-digest returned to `0e62290c…`, the same value the very first status
-call reported before any test traffic existed.
+One Durable Object per instance (`/agents/grid/<instance>`), the
+record in its own SQLite, derivation per request. The socket
+broadcasts only `{version, digest}` pings, so a connected page
+re-fetches *its own seat's* projection — a scoped seat's
+need-to-know is a fact about the payload, never a client promise.
 
-## Run your own
+**Honest label:** each instance's record lives in its own store —
+*an instance with the same operational fiction*, not the git.pp
+substrate. What is under test is the shape. The git-native sibling
+is [git.pp-ng](https://github.com/SuperInstance/git.pp-ng).
+
+## Playtests
 
 ```
-npm install
-npm run dev      # local
-npm run deploy   # wrangler deploy (needs a Cloudflare account with
-                 # Workers + Durable Objects; GRID binding and the
-                 # SQLite migration are declared in wrangler.toml)
+node test/playtest.mjs        # GRID_URL overrides the target
 ```
 
-The demo month, seats, and instance name live in `grid.json`; the
-default rule, the fold, the projections and the .ics pull are in
-`src/model.ts` — pure functions, commented as the design they
-implement. The page is `src/page.ts`; the agent and the port are
-`src/index.ts`.
+The test never lets the server grade itself: it re-folds each
+instance's raw record from the rule written out in the test and
+compares every cell, then probes the story (swaps, freeze guard,
+director name-freedom by grep, pager window, scope seats, pulls,
+re-fold digests per instance).
 
-## License
+Latest run (2026-10-13, against the live deployment):
+**custody 11/11 · on-call 13/13 · total 24/24.**
 
-MIT © 2026 SuperInstance.
+## Run it
+
+```
+bun install
+bunx wrangler dev        # local
+bunx wrangler deploy     # publish
+```
+
+MIT © SuperInstance. Part of the git.pp family.

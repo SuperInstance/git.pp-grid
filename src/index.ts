@@ -1,56 +1,66 @@
 /**
- * index.ts — the Grid: a shared month as a Durable Object agent.
+ * index.ts — the Grid worker: one Durable Object per INSTANCE.
  *
- * WHAT LIVES HERE, AND THE HONEST LABEL
- * The record — an append-only log of proposals, rulings, questions,
- * comments and events — lives in THIS instance's own store (the
- * agent's SQLite). It is deliberately labelled on the page: "an
- * instance with the same operational fiction", NOT the git.pp git
- * substrate. The shape is what is being play-tested: a default that
- * derives, a record that accumulates, a grid that is a pure fold of
- * the two, and seats that render the same record at different
- * resolutions. Nothing in the log is ever edited or deleted; a
- * rejection keeps its reason attached forever because the fold reads
- * the whole log, every time.
+ * The class below is the engine's host. It holds one instance's
+ * append-only record in its own SQLite, folds it through the
+ * engine (engine.ts), serves each seat's projection, and guards
+ * the port. Which instance a given object serves is passed in by
+ * the front door on every call and pinned in storage on first
+ * touch — the object itself carries no instance vocabulary.
  *
- * THE PORT (pull, don't push)
- * No seat can write into another seat's anything. The only way in is
- * the port: the action methods below, each of which APPENDS a record
- * authored by the acting seat. A proposal does nothing until the
- * OTHER seat rules on it — the server enforces what the fiction
- * promises (you cannot accept your own proposal). And every seat can
- * PULL: an .ics of its own days, generated from the fold, to carry
- * away to its own calendar. Pulling is free; pushing goes through
- * the port or it doesn't happen.
+ * THE HONEST LABEL (also on the page): the record lives in THIS
+ * instance's own store — "an instance with the same operational
+ * fiction", not the git.pp substrate. What is under test is the
+ * shape: a default that derives, a record that accumulates, a grid
+ * that is a pure fold, seats that render the same record at
+ * different resolutions, and ports that only pull or append.
  *
- * STATE vs STORAGE: the append-only log and a cached derived grid
- * live in ctx.storage. The agent `state` broadcast over the socket
- * is only a ping — {version, digest} — so a connected page re-fetches
- * its OWN seat projection over HTTP. That matters: the coach's
- * rendering is a server-side projection, and if the socket sprayed
- * the full record at every client, the coach's need-to-know would be
- * a client-side promise instead of a fact about the payload.
+ * THE PORT (pull, don't push): no seat can write into another
+ * seat's anything. The only way in is the action methods below,
+ * each of which APPENDS a record authored by the acting person.
+ * Guards the fiction demands, enforced here:
+ *   - you cannot rule on your own proposal (it waits for another);
+ *   - a rejection must carry a reason (it stays attached forever);
+ *   - a person proposes only within their scope (their rotation's
+ *     rows, or all rows for an all-scope seat);
+ *   - a proposal against a FROZEN cell must name the freeze in its
+ *     note — its reason thread — or the port refuses it.
+ * And every seat can PULL: an .ics/JSON artefact generated from
+ * the fold, to carry away. Pulling is free.
+ *
+ * STATE vs STORAGE: the log and a cached derived digest live in
+ * ctx.storage. The agent `state` broadcast over the socket is only
+ * a ping — {version, digest} — so a connected page re-fetches its
+ * OWN seat projection over HTTP. The socket never sprays the full
+ * record at every client: a scoped seat's need-to-know is a fact
+ * about the payload, not a client-side promise.
  */
 
 import { Agent, callable, getAgentByName, routeAgentRequest } from "agents";
-import gridConfig from "../grid.json";
 import {
-  buildIcs,
-  changeDays,
+  buildIcsPerson,
+  buildPagerIcs,
+  changeCells,
   deriveGrid,
+  frozenFor,
   gridDigestSource,
-  monthDates,
-  projectAgent,
-  projectCoach,
-  projectParent,
-  seedLog,
+  normalizeChange,
+  periodDates,
+  projectAggregate,
+  projectAgentView,
+  projectPager,
+  projectPerson,
+  projectScoped,
+  rotationRows,
+  rowLabel,
   sha256,
   type Change,
   type Entry,
-  type SeatId,
-  type ViewSeat,
-} from "./model";
-import { PAGE } from "./page";
+  type InstanceConfig,
+  type SeatSpec,
+} from "./engine";
+import { INSTANCES, seedFor } from "./instances";
+import { renderPage } from "./page";
 
 export interface Env {
   GRID: DurableObjectNamespace<Grid>;
@@ -63,129 +73,209 @@ interface Ping {
 
 const LOG_KEY = "record-log";
 const CACHE_KEY = "derived-cache";
-
-const isSeat = (s: unknown): s is SeatId => s === "mara" || s === "jonas";
-const otherSeat = (s: SeatId): SeatId => (s === "mara" ? "jonas" : "mara");
+const INSTANCE_KEY = "instance-id";
 
 export class Grid extends Agent<Env, Ping> {
   initialState: Ping = { version: 0, digest: null };
 
-  /** On first wake, if this instance has no record, seed the demo month. */
-  async onStart() {
+  /** Pin the instance this object serves; seed its record if empty. */
+  private async begin(instanceId: string): Promise<InstanceConfig> {
+    const cfg = INSTANCES[instanceId];
+    if (!cfg) throw new Error(`unknown instance ${instanceId}`);
+    const pinned = await this.ctx.storage.get<string>(INSTANCE_KEY);
+    if (pinned && pinned !== instanceId) {
+      throw new Error(`this object serves ${pinned}, not ${instanceId}`);
+    }
+    if (!pinned) await this.ctx.storage.put(INSTANCE_KEY, instanceId);
     const log = await this.ctx.storage.get<Entry[]>(LOG_KEY);
     if (!log) {
-      await this.ctx.storage.put(LOG_KEY, seedLog());
-      await this.refreshCache();
+      await this.ctx.storage.put(LOG_KEY, seedFor(instanceId));
+      await this.refreshCache(cfg);
+    }
+    return cfg;
+  }
+
+  /** On wake, re-derive the ping state if we know our instance. */
+  async onStart() {
+    const pinned = await this.ctx.storage.get<string>(INSTANCE_KEY).catch(() => undefined);
+    const id = pinned ?? (this.ctx.id.name && INSTANCES[this.ctx.id.name] ? this.ctx.id.name : undefined);
+    if (id) {
+      const cfg = await this.begin(id).catch(() => undefined);
+      if (cfg) await this.refreshCache(cfg).catch(() => undefined);
     }
   }
 
   /* ---------------- the record ---------------- */
 
-  @callable()
-  async getLog(): Promise<Entry[]> {
+  private async getLog(cfg: InstanceConfig): Promise<Entry[]> {
     const log = await this.ctx.storage.get<Entry[]>(LOG_KEY);
     if (log) return log;
-    const seed = seedLog();
+    const seed = seedFor(cfg.id);
     await this.ctx.storage.put(LOG_KEY, seed);
     return seed;
   }
 
-  /** Append one entry and re-derive the cached grid. The ONLY write path. */
+  /** Append one entry and re-derive the cached digest. The ONLY write path. */
   private async append(
-    author: SeatId | "system",
+    cfg: InstanceConfig,
+    author: string,
     kind: Entry["kind"],
-    days: string[],
+    cells: Entry["cells"],
     payload: Record<string, unknown>,
     reason?: string,
   ): Promise<Entry> {
-    const log = await this.getLog();
+    const log = await this.getLog(cfg);
     const entry: Entry = {
       id: `e-${String(log.length + 1).padStart(4, "0")}`,
       ts: new Date().toISOString(),
       author,
       kind,
-      days,
+      cells,
       payload,
       reason,
     };
     log.push(entry);
     await this.ctx.storage.put(LOG_KEY, log);
-    await this.refreshCache(log);
+    await this.refreshCache(cfg, log);
     return entry;
   }
 
-  private async refreshCache(log?: Entry[]): Promise<string> {
-    const entries = log ?? (await this.getLog());
-    const grid = deriveGrid(entries);
-    const digest = await sha256(gridDigestSource(grid));
+  private async refreshCache(cfg: InstanceConfig, log?: Entry[]): Promise<string> {
+    const entries = log ?? (await this.getLog(cfg));
+    const grid = deriveGrid(cfg, entries);
+    const digest = await sha256(gridDigestSource(cfg, grid));
     await this.ctx.storage.put(CACHE_KEY, { digest, at: new Date().toISOString() });
     this.setState({ version: entries.length, digest });
     return digest;
   }
 
-  private async digest(): Promise<string> {
+  private async digest(cfg: InstanceConfig): Promise<string> {
     const cache = await this.ctx.storage.get<{ digest: string }>(CACHE_KEY);
     if (cache) return cache.digest;
-    return this.refreshCache();
+    return this.refreshCache(cfg);
   }
 
   /* ---------------- reads (per-seat projections) ---------------- */
 
   @callable()
-  async view(seat: ViewSeat, human?: SeatId) {
-    const log = await this.getLog();
-    const grid = deriveGrid(log);
-    const digest = await this.digest();
-    if (seat === "coach") return projectCoach(grid, digest);
-    if (seat === "agent") return projectAgent(grid, log, digest, human ?? "mara");
-    if (isSeat(seat)) return projectParent(grid, log, seat, digest);
-    throw new Error(`unknown seat ${String(seat)}`);
+  async view(instanceId: string, seatId: string, opts: { for?: string; row?: string } = {}) {
+    const cfg = await this.begin(instanceId);
+    const spec = cfg.seats.find((s) => s.id === seatId);
+    if (!spec) throw new Error(`instance ${cfg.id} has no seat ${seatId}`);
+    const log = await this.getLog(cfg);
+    const grid = deriveGrid(cfg, log);
+    const digest = await this.digest(cfg);
+    switch (spec.kind) {
+      case "person":
+        return projectPerson(cfg, grid, log, spec, digest);
+      case "scoped":
+        return projectScoped(cfg, grid, spec, digest);
+      case "aggregate":
+        return projectAggregate(cfg, grid, spec, digest);
+      case "agent":
+        return projectAgentView(cfg, grid, log, opts.for ?? spec.person, digest);
+      case "pager":
+        return projectPager(cfg, grid, spec, opts.row ?? spec.row, digest);
+    }
   }
 
   @callable()
-  async log() {
-    const entries = await this.getLog();
+  async log(instanceId: string) {
+    const cfg = await this.begin(instanceId);
+    const entries = await this.getLog(cfg);
     return { length: entries.length, entries };
   }
 
   @callable()
-  async status() {
-    const entries = await this.getLog();
+  async rawLog(instanceId: string): Promise<Entry[]> {
+    const cfg = await this.begin(instanceId);
+    return this.getLog(cfg);
+  }
+
+  @callable()
+  async status(instanceId: string) {
+    const cfg = await this.begin(instanceId);
+    const entries = await this.getLog(cfg);
     return {
-      month: gridConfig.month,
+      instance: cfg.id,
+      title: cfg.title,
+      month: cfg.month,
       logLength: entries.length,
-      digest: await this.digest(),
-      instance: gridConfig.instance,
+      digest: await this.digest(cfg),
     };
   }
 
   /* ---------------- the port: actions that append ---------------- */
 
-  @callable()
-  async propose(seat: SeatId, change: Change, note?: string, tentative?: boolean) {
-    if (!isSeat(seat)) throw new Error("proposals come from a parent seat");
-    for (const d of changeDays(change)) {
-      if (!monthDates().includes(d)) throw new Error(`${d} is outside the demo month`);
+  /** The acting seat must be a person seat; returns its spec. */
+  private personSpec(cfg: InstanceConfig, person: string): Extract<SeatSpec, { kind: "person" }> {
+    const spec = cfg.seats.find(
+      (s): s is Extract<SeatSpec, { kind: "person" }> => s.kind === "person" && s.person === person,
+    );
+    if (!spec) throw new Error(`${person} holds no seat on ${cfg.id} that can use the port`);
+    return spec;
+  }
+
+  private scopeRows(cfg: InstanceConfig, spec: Extract<SeatSpec, { kind: "person" }>): string[] | "all" {
+    return spec.rowsScope === "all" ? "all" : rotationRows(cfg, spec.person);
+  }
+
+  /** Validate a change's cells against the instance, the seat's
+   *  scope, and the freeze rule. Throws the doctrine, in words. */
+  private assertChangeAllowed(
+    cfg: InstanceConfig,
+    spec: Extract<SeatSpec, { kind: "person" }>,
+    change: Change,
+    note?: string,
+  ) {
+    const dates = periodDates(cfg);
+    const scope = this.scopeRows(cfg, spec);
+    for (const ref of changeCells(change)) {
+      if (!cfg.rows.some((r) => r.id === ref.row)) throw new Error(`no such row: ${ref.row}`);
+      if (!dates.includes(ref.day)) throw new Error(`${ref.day} is outside ${cfg.periodLabel}`);
+      if (scope !== "all" && !scope.includes(ref.row)) {
+        throw new Error(
+          `${cfg.people[spec.person]?.name ?? spec.person} has no scope on ${rowLabel(cfg, ref.row)} — ` +
+            `their seat covers ${scope.map((r) => rowLabel(cfg, r)).join(", ")}`,
+        );
+      }
+      const fz = frozenFor(cfg, ref.row, ref.day);
+      if (fz && !/freeze/i.test(note ?? "")) {
+        throw new Error(
+          `${ref.day} (${rowLabel(cfg, ref.row)}) is under "${fz.label}" — ` +
+            `a proposal against a frozen day must name the freeze in its note.`,
+        );
+      }
     }
-    const entry = await this.append(seat, "proposal", changeDays(change), {
+    if (change.type === "assign" && change.to !== null && !cfg.people[change.to]) {
+      throw new Error(`no such person: ${change.to}`);
+    }
+  }
+
+  @callable()
+  async propose(instanceId: string, person: string, change: Change, note?: string, tentative?: boolean) {
+    const cfg = await this.begin(instanceId);
+    const spec = this.personSpec(cfg, person);
+    this.assertChangeAllowed(cfg, spec, change, note);
+    const entry = await this.append(cfg, person, "proposal", changeCells(change), {
       change,
       note: note ?? "",
       tentative: Boolean(tentative),
     });
-    return { ok: true, entry, logLength: (await this.getLog()).length };
+    return { ok: true, entry, logLength: (await this.getLog(cfg)).length };
   }
 
-  /** Shared guard for accept/reject/counter: the OTHER seat rules, once. */
-  private async proposalFor(seat: SeatId, proposalId: string) {
-    const log = await this.getLog();
+  /** Shared guard for accept/reject/counter: ANOTHER seat rules, once. */
+  private async proposalFor(cfg: InstanceConfig, person: string, proposalId: string) {
+    const log = await this.getLog(cfg);
     const target = log.find((e) => e.id === proposalId);
     if (!target || (target.kind !== "proposal" && target.kind !== "counter")) {
       throw new Error(`no such proposal: ${proposalId}`);
     }
-    if (target.author === seat) {
-      throw new Error("you cannot rule on your own proposal — it waits for the other seat");
+    if (target.author === person) {
+      throw new Error("you cannot rule on your own proposal — it waits for another seat");
     }
-    const grid = deriveGrid(log);
+    const grid = deriveGrid(cfg, log);
     const view = grid.proposals[proposalId];
     if (!view || view.status !== "pending") {
       throw new Error(`proposal ${proposalId} is already ${view?.status ?? "resolved"}`);
@@ -194,84 +284,101 @@ export class Grid extends Agent<Env, Ping> {
   }
 
   @callable()
-  async accept(seat: SeatId, proposalId: string) {
-    await this.proposalFor(seat, proposalId);
-    const entry = await this.append(seat, "accept", [], { proposalId });
-    return { ok: true, entry, logLength: (await this.getLog()).length };
+  async accept(instanceId: string, person: string, proposalId: string) {
+    const cfg = await this.begin(instanceId);
+    this.personSpec(cfg, person);
+    const { view } = await this.proposalFor(cfg, person, proposalId);
+    const entry = await this.append(cfg, person, "accept", changeCells(view.change), { proposalId });
+    return { ok: true, entry, logLength: (await this.getLog(cfg)).length };
   }
 
   @callable()
-  async reject(seat: SeatId, proposalId: string, reason: string) {
+  async reject(instanceId: string, person: string, proposalId: string, reason: string) {
     if (!reason || !reason.trim()) {
       throw new Error("a rejection must carry a reason — it stays attached forever");
     }
-    await this.proposalFor(seat, proposalId);
-    const entry = await this.append(seat, "reject", [], { proposalId }, reason.trim());
-    return { ok: true, entry, logLength: (await this.getLog()).length };
+    const cfg = await this.begin(instanceId);
+    this.personSpec(cfg, person);
+    const { view } = await this.proposalFor(cfg, person, proposalId);
+    const entry = await this.append(cfg, person, "reject", changeCells(view.change), { proposalId }, reason.trim());
+    return { ok: true, entry, logLength: (await this.getLog(cfg)).length };
   }
 
   @callable()
-  async counter(seat: SeatId, proposalId: string, change: Change, note?: string) {
-    await this.proposalFor(seat, proposalId);
-    const entry = await this.append(seat, "counter", changeDays(change), {
+  async counter(instanceId: string, person: string, proposalId: string, change: Change, note?: string) {
+    const cfg = await this.begin(instanceId);
+    const spec = this.personSpec(cfg, person);
+    await this.proposalFor(cfg, person, proposalId);
+    this.assertChangeAllowed(cfg, spec, change, note);
+    const entry = await this.append(cfg, person, "counter", changeCells(change), {
       change,
       counterOf: proposalId,
       note: note ?? "",
     });
-    return { ok: true, entry, logLength: (await this.getLog()).length };
+    return { ok: true, entry, logLength: (await this.getLog(cfg)).length };
   }
 
   @callable()
-  async question(seat: SeatId, text: string, proposalId?: string, day?: string) {
+  async question(instanceId: string, person: string, text: string, proposalId?: string, day?: string, row?: string) {
     if (!text?.trim()) throw new Error("a question needs words");
-    const days = day ? [day] : [];
-    const entry = await this.append(seat, "question", days, {
+    const cfg = await this.begin(instanceId);
+    this.personSpec(cfg, person);
+    const cells = day ? [{ row: row ?? cfg.rows[0].id, day }] : [];
+    const entry = await this.append(cfg, person, "question", cells, {
       text: text.trim(),
       ...(proposalId ? { proposalId } : {}),
     });
-    return { ok: true, entry, logLength: (await this.getLog()).length };
+    return { ok: true, entry, logLength: (await this.getLog(cfg)).length };
   }
 
   @callable()
-  async comment(seat: SeatId, text: string, day?: string) {
+  async comment(instanceId: string, person: string, text: string, day?: string, row?: string) {
     if (!text?.trim()) throw new Error("a comment needs words");
-    const entry = await this.append(seat, "comment", day ? [day] : [], { text: text.trim() });
-    return { ok: true, entry, logLength: (await this.getLog()).length };
+    const cfg = await this.begin(instanceId);
+    this.personSpec(cfg, person);
+    const entry = await this.append(cfg, person, "comment", day ? [{ row: row ?? cfg.rows[0].id, day }] : [], {
+      text: text.trim(),
+    });
+    return { ok: true, entry, logLength: (await this.getLog(cfg)).length };
   }
 
-  /** Opt into a reminder for an event on any day — recorded, not toggled. */
+  /** Opt into a reminder for an event on a cell — recorded, not toggled. */
   @callable()
-  async optin(seat: SeatId, day: string, title: string) {
-    const entry = await this.append(seat, "comment", [day], {
+  async optin(instanceId: string, person: string, day: string, title: string, row?: string) {
+    const cfg = await this.begin(instanceId);
+    this.personSpec(cfg, person);
+    const entry = await this.append(cfg, person, "comment", [{ row: row ?? cfg.rows[0].id, day }], {
       text: `Reminder set: ${title} on ${day}`,
       optIn: `${day}|${title}`,
     });
-    return { ok: true, entry, logLength: (await this.getLog()).length };
+    return { ok: true, entry, logLength: (await this.getLog(cfg)).length };
   }
 
   /* ---------------- the re-fold (the burn test, restated) ---------------- */
 
   /**
-   * Discard the cached derived grid and re-derive it from the log
-   * alone. If the cache and the re-fold disagree, something other
-   * than the record was carrying state — the one thing this design
-   * says must never happen.
+   * Discard the cached digest and re-derive it from the log alone.
+   * If the cache and the re-fold disagree, something other than the
+   * record was carrying state — the one thing this design says must
+   * never happen.
    */
   @callable()
-  async refold() {
-    const before = await this.digest();
-    const log = await this.getLog();
+  async refold(instanceId: string) {
+    const cfg = await this.begin(instanceId);
+    const before = await this.digest(cfg);
+    const log = await this.getLog(cfg);
     await this.ctx.storage.delete(CACHE_KEY);
-    const after = await this.refreshCache(log);
+    const after = await this.refreshCache(cfg, log);
     return { before, after, identical: before === after, logLength: log.length };
   }
 
-  /** Demo hygiene: restore the seeded record (Casey gets a clean slate). */
+  /** Demo hygiene: restore this instance's seeded record. */
   @callable()
-  async reset() {
-    await this.ctx.storage.put(LOG_KEY, seedLog());
-    const digest = await this.refreshCache();
-    return { ok: true, digest, logLength: (await this.getLog()).length };
+  async reset(instanceId: string) {
+    const cfg = await this.begin(instanceId);
+    await this.ctx.storage.put(LOG_KEY, seedFor(cfg.id));
+    const digest = await this.refreshCache(cfg);
+    return { ok: true, digest, logLength: (await this.getLog(cfg)).length };
   }
 }
 
@@ -279,110 +386,187 @@ export class Grid extends Agent<Env, Ping> {
 /* Worker front door                                                   */
 /* ------------------------------------------------------------------ */
 
-function parseChange(raw: unknown): Change {
-  const c = raw as Change;
-  if (!c || typeof c !== "object") throw new Error("change required");
-  if (c.type === "assign" || c.type === "swap" || c.type === "event") return c;
-  throw new Error(`unknown change type ${String((c as { type?: unknown }).type)}`);
+const DEFAULT_INSTANCE = "custody"; // API compat: the first deployment's clients name no instance
+
+function instanceOf(url: URL, body?: Record<string, unknown>): string {
+  const id =
+    (body?.instance as string) ?? url.searchParams.get("instance") ?? DEFAULT_INSTANCE;
+  if (!INSTANCES[id]) throw new Error(`unknown instance ${id}`);
+  return id;
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    const stub = await getAgentByName(env.GRID, gridConfig.instance);
-
-    if (url.pathname === "/") {
-      return new Response(PAGE, {
-        headers: { "content-type": "text/html; charset=utf-8" },
-      });
-    }
-
-    // The pull: one seat's days as an .ics. GET, seat-scoped, and
-    // generated from the fold — a copy to carry away, never a write.
-    if (url.pathname === "/pull") {
-      const seat = url.searchParams.get("seat") ?? "";
-      if (!isSeat(seat)) return new Response("seat must be mara or jonas", { status: 400 });
-      const log = await stub.getLog();
-      const ics = buildIcs(deriveGrid(log), log, seat);
-      return new Response(ics, {
-        headers: {
-          "content-type": "text/calendar; charset=utf-8",
-          "content-disposition": `attachment; filename="grid-${seat}.ics"`,
-        },
-      });
-    }
-
-    if (url.pathname === "/api/grid/log") {
-      return Response.json(await stub.log());
-    }
-
-    if (url.pathname === "/api/grid" && request.method === "GET") {
-      const seat = (url.searchParams.get("seat") ?? "mara") as ViewSeat;
-      const human = (url.searchParams.get("for") ?? "mara") as SeatId;
-      try {
-        return Response.json(await stub.view(seat, human));
-      } catch (err) {
-        return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 });
+    try {
+      if (url.pathname === "/") {
+        const id = url.searchParams.get("instance") ?? "oncall"; // the page leads with engineering
+        const cfg = INSTANCES[id];
+        if (!cfg) return new Response(`unknown instance ${id}`, { status: 400 });
+        return new Response(renderPage(cfg, Object.values(INSTANCES)), {
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
       }
-    }
 
-    if (url.pathname === "/api/grid" && request.method === "POST") {
-      let body: Record<string, unknown>;
-      try {
-        body = (await request.json()) as Record<string, unknown>;
-      } catch {
-        return Response.json({ error: "JSON body required" }, { status: 400 });
+      if (url.pathname === "/api/instances") {
+        return Response.json(
+          Object.values(INSTANCES).map((c) => ({ id: c.id, title: c.title, tagline: c.tagline })),
+        );
       }
-      const seat = body.seat as SeatId;
-      const action = String(body.action ?? "");
-      try {
-        switch (action) {
-          case "status":
-            return Response.json(await stub.status());
-          case "refold":
-            return Response.json(await stub.refold());
-          case "reset":
-            return Response.json(await stub.reset());
-          case "propose":
-            if (!isSeat(seat)) throw new Error("seat must be mara or jonas");
+
+      // The pulls: artefacts generated from the fold. GET, seat-
+      // scoped, a copy to carry away — never a write back.
+      if (url.pathname === "/pull") {
+        const instanceId = instanceOf(url);
+        const cfg = INSTANCES[instanceId];
+        const stub = await getAgentByName(env.GRID, instanceId);
+        const seatParam = url.searchParams.get("seat") ?? "";
+        const log = await stub.rawLog(instanceId);
+        const grid = deriveGrid(cfg, log);
+        const pagerSpec = cfg.seats.find((s) => s.kind === "pager");
+        if (pagerSpec && seatParam === pagerSpec.id) {
+          const row = url.searchParams.get("row") ?? (pagerSpec as { row: string }).row;
+          if (!cfg.rows.some((r) => r.id === row)) {
+            return new Response(`no such row: ${row}`, { status: 400 });
+          }
+          if (url.searchParams.get("format") === "json") {
+            const digest = (await stub.status(instanceId)).digest;
             return Response.json(
-              await stub.propose(seat, parseChange(body.change), body.note as string, body.tentative as boolean),
+              projectPager(cfg, grid, pagerSpec as Extract<SeatSpec, { kind: "pager" }>, row, digest),
             );
-          case "accept":
-            if (!isSeat(seat)) throw new Error("seat must be mara or jonas");
-            return Response.json(await stub.accept(seat, String(body.proposalId)));
-          case "reject":
-            if (!isSeat(seat)) throw new Error("seat must be mara or jonas");
-            return Response.json(await stub.reject(seat, String(body.proposalId), String(body.reason ?? "")));
-          case "counter":
-            if (!isSeat(seat)) throw new Error("seat must be mara or jonas");
-            return Response.json(
-              await stub.counter(seat, String(body.proposalId), parseChange(body.change), body.note as string),
-            );
-          case "question":
-            if (!isSeat(seat)) throw new Error("seat must be mara or jonas");
-            return Response.json(
-              await stub.question(seat, String(body.text ?? ""), body.proposalId as string, body.day as string),
-            );
-          case "comment":
-            if (!isSeat(seat)) throw new Error("seat must be mara or jonas");
-            return Response.json(await stub.comment(seat, String(body.text ?? ""), body.day as string));
-          case "optin":
-            if (!isSeat(seat)) throw new Error("seat must be mara or jonas");
-            return Response.json(await stub.optin(seat, String(body.day ?? ""), String(body.title ?? "")));
-          default:
-            return Response.json({ error: `unknown action ${action}` }, { status: 400 });
+          }
+          return new Response(buildPagerIcs(cfg, grid, row), {
+            headers: {
+              "content-type": "text/calendar; charset=utf-8",
+              "content-disposition": `attachment; filename="pager-${row}.ics"`,
+            },
+          });
         }
-      } catch (err) {
-        return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 });
+        if (!cfg.people[seatParam]) {
+          return new Response(`seat must name a person on ${instanceId}`, { status: 400 });
+        }
+        return new Response(buildIcsPerson(cfg, grid, log, seatParam), {
+          headers: {
+            "content-type": "text/calendar; charset=utf-8",
+            "content-disposition": `attachment; filename="grid-${instanceId}-${seatParam}.ics"`,
+          },
+        });
       }
+
+      if (url.pathname === "/api/grid/log") {
+        const instanceId = instanceOf(url);
+        const stub = await getAgentByName(env.GRID, instanceId);
+        return Response.json(await stub.log(instanceId));
+      }
+
+      if (url.pathname === "/api/grid" && request.method === "GET") {
+        const instanceId = instanceOf(url);
+        const cfg = INSTANCES[instanceId];
+        const stub = await getAgentByName(env.GRID, instanceId);
+        const seat =
+          url.searchParams.get("seat") ?? cfg.seats.find((s) => s.kind === "person")?.id ?? "";
+        try {
+          return Response.json(
+            await stub.view(instanceId, seat, {
+              for: url.searchParams.get("for") ?? undefined,
+              row: url.searchParams.get("row") ?? undefined,
+            }),
+          );
+        } catch (err) {
+          return Response.json(
+            { error: err instanceof Error ? err.message : String(err) },
+            { status: 400 },
+          );
+        }
+      }
+
+      if (url.pathname === "/api/grid" && request.method === "POST") {
+        let body: Record<string, unknown>;
+        try {
+          body = (await request.json()) as Record<string, unknown>;
+        } catch {
+          return Response.json({ error: "JSON body required" }, { status: 400 });
+        }
+        const instanceId = instanceOf(url, body);
+        const cfg = INSTANCES[instanceId];
+        const stub = await getAgentByName(env.GRID, instanceId);
+        const person = String(body.seat ?? "");
+        const action = String(body.action ?? "");
+        try {
+          switch (action) {
+            case "status":
+              return Response.json(await stub.status(instanceId));
+            case "refold":
+              return Response.json(await stub.refold(instanceId));
+            case "reset":
+              return Response.json(await stub.reset(instanceId));
+            case "propose":
+              return Response.json(
+                await stub.propose(
+                  instanceId,
+                  person,
+                  normalizeChange(cfg, body.change),
+                  body.note as string,
+                  body.tentative as boolean,
+                ),
+              );
+            case "accept":
+              return Response.json(await stub.accept(instanceId, person, String(body.proposalId)));
+            case "reject":
+              return Response.json(
+                await stub.reject(instanceId, person, String(body.proposalId), String(body.reason ?? "")),
+              );
+            case "counter":
+              return Response.json(
+                await stub.counter(
+                  instanceId,
+                  person,
+                  String(body.proposalId),
+                  normalizeChange(cfg, body.change),
+                  body.note as string,
+                ),
+              );
+            case "question":
+              return Response.json(
+                await stub.question(
+                  instanceId,
+                  person,
+                  String(body.text ?? ""),
+                  body.proposalId as string,
+                  body.day as string,
+                  body.row as string,
+                ),
+              );
+            case "comment":
+              return Response.json(
+                await stub.comment(instanceId, person, String(body.text ?? ""), body.day as string, body.row as string),
+              );
+            case "optin":
+              return Response.json(
+                await stub.optin(instanceId, person, String(body.day ?? ""), String(body.title ?? ""), body.row as string),
+              );
+            default:
+              return Response.json({ error: `unknown action ${action}` }, { status: 400 });
+          }
+        } catch (err) {
+          return Response.json(
+            { error: err instanceof Error ? err.message : String(err) },
+            { status: 400 },
+          );
+        }
+      }
+
+      // WebSocket access to the instance's agent (/agents/grid/<instance>)
+      // — the page listens for {version, digest} pings only.
+      const agentResponse = await routeAgentRequest(request, env);
+      if (agentResponse) return agentResponse;
+
+      return new Response("not found", { status: 404 });
+    } catch (err) {
+      return Response.json(
+        { error: err instanceof Error ? err.message : String(err) },
+        { status: 400 },
+      );
     }
-
-    // WebSocket access to the agent (/agents/grid/demo) — the page
-    // listens for {version, digest} pings and re-fetches its seat.
-    const agentResponse = await routeAgentRequest(request, env);
-    if (agentResponse) return agentResponse;
-
-    return new Response("not found", { status: 404 });
   },
 };

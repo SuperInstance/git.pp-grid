@@ -1,38 +1,73 @@
 /**
- * page.ts — the Grid, rendered.
+ * page.ts — the Grid, rendered per instance.
  *
- * One page, no build step, no framework. It speaks HTTP to the Grid
- * agent (GET /api/grid?seat=… for the seat's own projection, POST
- * /api/grid for the port's actions) and listens on the agent socket
- * for {version, digest} pings — a ping means "the record grew;
- * re-fetch YOUR seat's projection". The page never receives another
- * seat's payload: the coach's rendering is computed on the server,
- * so what the coach can't see was never sent.
+ * renderPage(cfg, all) bakes one instance's config into a generic
+ * client. The client speaks HTTP to the instance's agent (GET
+ * /api/grid?instance=…&seat=… for the seat's own projection, POST
+ * /api/grid for the port's actions) and listens on the agent
+ * socket for {version, digest} pings — a ping means "the record
+ * grew; re-fetch YOUR seat's projection". The page never receives
+ * another seat's payload: scoped and aggregate renderings are
+ * computed on the server, so what a seat cannot see was never sent.
  *
- * LAYOUT — a story first, depth below (the zero-shot standard):
- *   1. The claim: two people, one kid, one month, derived — plus the
- *      default, stated in plain words, because silence inherits it.
- *   2. The seats: four renderings of the same record. Switching
- *      seats changes what the same truth looks like from where you
- *      sit — that is the X factor, made touchable.
- *   3. The month, synoptic: the big color is responsibility; events
- *      are highlights inside a day; a pending proposal wears amber
- *      hatching — a color, not a fact.
- *   4. The box: click any day and it opens — the description (what
- *      the default says, what stands) and the equation (every record
- *      that touched the day, reasons attached, rejections struck
- *      through but never deleted). Plato's rule: a cell that can
- *      explain itself.
- *   5. The port and the pull: propose/accept/reject/counter/ask —
- *      the only way in — and "pull my days", the one way out that
- *      belongs to each seat alone.
+ * Every instance's first screen carries the same shape:
+ *   1. The switcher — one engine, many grids.
+ *   2. The claim (shared) + the instance's tagline, its rule in
+ *      plain words, and the engine's five primitives in one panel.
+ *   3. The seats: renderings of the same record, one per scope.
+ *   4. The grid: the big color is the standing value; events are
+ *      highlights; a pending proposal wears amber hatching (a
+ *      color, not a fact); a frozen cell is locked; a gap is a
+ *      hole where nobody stands.
+ *   5. The box: click any cell — the description and the equation.
+ *   6. The port (propose / rule), the pull (artefacts per seat),
+ *      the re-fold proof, and the record itself, in order.
  */
-export const PAGE = `<!doctype html>
+
+import type { InstanceConfig } from "./engine";
+import { INSTANCE_ORDER } from "./instances";
+
+const CLAIM = "One record. Every seat sees its scope. Nothing moves without a ruling.";
+
+const PRIMITIVES = [
+  ["Defaults stand", "the standing grid derives from a declared rule — silence inherits it, no meeting required."],
+  ["Proposals are a color", "a pending delta against the default, never a fact, until another seat rules on it."],
+  ["Reasons stay", "a rejection keeps its reason attached to the cell forever; nothing is edited, nothing is deleted."],
+  ["Seats see their scope", "every rendering is computed server-side from the same record — what a seat can't see was never sent."],
+  ["Pull, don't push", "take your artefact away (.ics, JSON); write only through the port, as a record, under your own name."],
+];
+
+export function renderPage(cfg: InstanceConfig, all: InstanceConfig[]): string {
+  const clientCfg = {
+    id: cfg.id,
+    title: cfg.title,
+    periodLabel: cfg.periodLabel,
+    now: cfg.now,
+    month: cfg.month,
+    rows: cfg.rows,
+    people: cfg.people,
+    seats: cfg.seats,
+  };
+  const switcher = INSTANCE_ORDER.map((id) => all.find((c) => c.id === id))
+    .filter((c): c is InstanceConfig => Boolean(c))
+    .map(
+      (c) =>
+        `<a href="/?instance=${c.id}"><button class="inst${c.id === cfg.id ? " on" : ""}">${c.title}</button></a>`,
+    )
+    .join(" ");
+  const seatButtons = cfg.seats
+    .map((s) => `<button class="seat" data-seat="${s.id}">${s.label}</button>`)
+    .join("\n      ");
+  const primitives = PRIMITIVES.map(
+    ([h, t]) => `<div class="prim"><b>${h}</b> — ${t}</div>`,
+  ).join("\n      ");
+
+  return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>The Grid — a shared month, derived</title>
+<title>The Grid — ${cfg.title}</title>
 <style>
   :root { color-scheme: dark; }
   body { font: 15px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -40,35 +75,38 @@ export const PAGE = `<!doctype html>
   h1 { font-size: 22px; margin: 0; }
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: #8b949e; margin: 26px 0 8px; }
   .tag { color: #8b949e; font-size: 13px; }
-  .claim { font-size: 24px; font-weight: 700; line-height: 1.3; margin: 14px 0 8px; }
-  .hero p { margin: 6px 0; max-width: 50rem; }
+  .claim { font-size: 21px; font-weight: 700; line-height: 1.3; margin: 12px 0 4px; }
+  .tagline { font-size: 16px; color: #c9d1d9; margin: 2px 0 8px; }
+  .hero p { margin: 6px 0; max-width: 52rem; }
   .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px 16px; margin: 10px 0; }
   .rule { border-left: 3px solid #58a6ff; }
   .honest { border-left: 3px solid #9e6a03; color: #d8c58f; }
+  .prims { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 18px; font-size: 13.5px; }
+  .prim b { color: #e6edf3; }
   .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 10px 0; }
   button, select, input, textarea { background: #161b22; color: #e6edf3; border: 1px solid #30363d;
          border-radius: 6px; padding: 6px 10px; font: inherit; }
   button { cursor: pointer; } button:hover { border-color: #58a6ff; }
-  button.seat.on { border-color: #e6edf3; background: #21262d; font-weight: 700; }
+  button.seat.on, button.inst.on { border-color: #e6edf3; background: #21262d; font-weight: 700; }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: #f85149; display: inline-block; }
   .dot.on { background: #3fb950; }
-  /* the month */
   .dow { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; color: #8b949e; font-size: 12px; text-align: center; margin-bottom: 4px; }
-  .month { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
-  .cell { position: relative; border: 1px solid #30363d; border-radius: 8px; min-height: 92px; padding: 6px 8px;
+  .month { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin-bottom: 14px; }
+  .cell { position: relative; border: 1px solid #30363d; border-radius: 8px; min-height: 74px; padding: 6px 8px;
           cursor: pointer; overflow: hidden; background: #0d1117; }
   .cell:hover { border-color: #58a6ff; }
   .cell .num { font-weight: 700; font-size: 14px; }
   .cell .who { font-size: 11px; color: #c9d1d9; }
   .cell .ev { font-size: 11px; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .cell.today { outline: 2px solid #e6edf3; outline-offset: -2px; }
+  .cell.gap { border: 1px dashed #da3633; background: repeating-linear-gradient(45deg, rgba(218,54,51,.12) 0 8px, transparent 8px 16px); }
+  .cell.frozen { box-shadow: inset 0 0 0 2px #9e6a03; }
   .cell .moved { position: absolute; top: 6px; right: 8px; font-size: 10px; color: #8b949e; }
   .cell .pend { position: absolute; left: 0; right: 0; bottom: 0; font-size: 10.5px; padding: 2px 8px;
     background: repeating-linear-gradient(45deg, rgba(227,179,65,.35) 0 6px, rgba(227,179,65,.12) 6px 12px); color: #f0d48a; }
-  .blank { border: 1px dashed #21262d; border-radius: 8px; min-height: 92px; }
+  .blank { border: 1px dashed #21262d; border-radius: 8px; min-height: 74px; }
   .legend { font-size: 12px; color: #8b949e; }
   .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; vertical-align: -1px; margin: 0 3px 0 8px; }
-  /* inbox, box, feed */
   .ding { border-left: 3px solid #e3b341; }
   .ding.res { border-left-color: #30363d; color: #8b949e; }
   .strike { text-decoration: line-through; color: #8b949e; }
@@ -82,421 +120,480 @@ export const PAGE = `<!doctype html>
   .badge { font-weight: 700; padding: 2px 8px; border-radius: 10px; }
   .badge.ok { background: #238636; color: #fff; } .badge.bad { background: #da3633; color: #fff; }
   .digest { word-break: break-all; font-size: 12px; color: #8b949e; }
-  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
-  @media (max-width: 820px) { .grid2 { grid-template-columns: 1fr; } .cell { min-height: 74px; } }
+  table.agg { border-collapse: collapse; width: 100%; }
+  table.agg td, table.agg th { border-bottom: 1px solid #30363d; padding: 6px 8px; text-align: left; font-size: 13.5px; }
   label { font-size: 12.5px; color: #8b949e; display: block; margin-top: 8px; }
   footer { color: #8b949e; margin-top: 40px; font-size: 13px; }
   a { color: #58a6ff; }
+  @media (max-width: 820px) { .prims { grid-template-columns: 1fr; } .cell { min-height: 62px; } }
 </style>
 </head>
 <body>
 <header>
   <div class="bar" style="justify-content:space-between">
-    <h1>The Grid <span class="tag">git.pp — a shared month, derived not discussed</span></h1>
+    <h1>The Grid <span class="tag">git.pp — one engine, many grids</span></h1>
     <span class="tag"><span class="dot" id="wsdot"></span> <span id="wslabel">connecting…</span></span>
   </div>
+  <div class="bar" id="instbar">${switcher}</div>
   <div class="hero">
-    <p class="claim">Two people. One kid. One month — derived, not discussed.</p>
-    <p>Chat threads lose this argument: “that Monday” slides, the subtext evaporates, and nobody can tell which version of a day is standing. So the month lives here instead — a default that simply happens unless somebody proposes otherwise, and an append-only record of every proposal, ruling, question and reason. The grid below is a <b>fold</b> of those two things, recomputed from the record. Nothing is ever edited or deleted.</p>
-    <p class="tag">Demo data — Mara and Jonas are fictional. The pattern is the point.</p>
+    <p class="claim">${CLAIM}</p>
+    <p class="tagline">${cfg.tagline}</p>
+    <p>${cfg.intro}</p>
+    <p class="tag">${cfg.demoNote}</p>
+  </div>
+  <div class="card">
+    <b>The engine, in five lines</b>
+    <div class="prims" style="margin-top:8px">
+      ${primitives}
+    </div>
   </div>
   <div class="card rule">
-    <b>The default.</b> <span id="ruletext">…</span>
+    <b>The default.</b> <span id="ruletext">${cfg.ruleText}</span>
     <div class="tag" style="margin-top:6px">Silence means the default holds. Talk only happens at the delta — and the delta wears a color.</div>
   </div>
 </header>
 
-<h2>Sit somewhere — the same record, rendered for where you sit</h2>
+<h2>Sit in a seat — the same record, rendered for where you sit</h2>
 <div class="bar" id="seatbar">
-  <button class="seat" data-seat="mara">Mara · parent</button>
-  <button class="seat" data-seat="jonas">Jonas · parent</button>
-  <button class="seat" data-seat="coach">Coach · need-to-know</button>
-  <button class="seat" data-seat="agent">Agent · dings only</button>
-  <span class="tag" id="agentfor" style="display:none">agent for:
-    <button class="seat" data-human="mara">Mara</button>
-    <button class="seat" data-human="jonas">Jonas</button>
-  </span>
-  <span class="tag" id="digestline"></span>
+      ${seatButtons}
+</div>
+<div class="bar" id="humanbar" style="display:none">
+  <span class="tag">agent for:</span>
+  <span id="humanbtns"></span>
+</div>
+<div class="bar" id="pagerbar" style="display:none">
+  <span class="tag">pager row:</span>
+  <select id="pagerrow"></select>
+  <span class="tag">pull:</span>
+  <a id="pagerics" href="#" download>.ics</a>
+  <a id="pagerjson" href="#" target="_blank">JSON</a>
+</div>
+<div id="inbox"></div>
+<div id="main"></div>
+
+<h2>Open a cell — the description and the equation</h2>
+<div class="card" id="box"><span class="tag">Click any cell in a full-grid seat. Its default, what stands now, any freeze, every record that touched it — rejected ones struck through, reasons attached. A cell that can explain itself.</span></div>
+
+<h2>The port — propose, and rule on what's pending</h2>
+<div class="card" id="port">
+  <div class="tag" id="acting"></div>
+  <label>kind of proposal
+    <select id="ptype">
+      <option value="assign">assign a day</option>
+      <option value="swap">swap two days</option>
+      <option value="event">add an event</option>
+    </select>
+  </label>
+  <div id="pfields"></div>
+  <label>note — say why (a proposal against a frozen day must name its freeze here)
+    <input id="pnote" style="width:100%" placeholder="e.g. conference Monday — trade?">
+  </label>
+  <label style="display:inline-block"><input type="checkbox" id="ptent"> tentative — I'm not sure yet</label>
+  <label style="display:inline-block"><input type="checkbox" id="pcounter"> this is a counter to proposal <input id="pcounterid" size="8" placeholder="e-0007"></label>
+  <div class="bar"><button id="propose">Propose</button><span class="tag" id="pmsg"></span></div>
+  <div class="tag">Pushes only happen here, as records, under your name. Rejecting another seat's proposal takes a reason — you'll be asked, and it stays attached forever. You cannot rule on your own proposal.</div>
 </div>
 
-<div id="inboxwrap"><h2>Your dings</h2><div id="inbox"></div></div>
-
-<div id="gridwrap">
-  <h2>October 2026 — the synoptic month</h2>
-  <div class="dow"><span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span></div>
-  <div class="month" id="month"></div>
-  <p class="legend">
-    <span class="swatch" style="background:#e08a3c"></span>Mara's night
-    <span class="swatch" style="background:#4a90d9"></span>Jonas's night
-    <span class="swatch" style="background:repeating-linear-gradient(45deg, rgba(227,179,65,.6) 0 4px, rgba(227,179,65,.2) 4px 8px)"></span>a proposal is pending — a color, not a fact
-    <span style="margin-left:8px">◦ = moved off the default by an accepted proposal · click any day to open the box</span>
-  </p>
-</div>
-
-<div id="listwrap" style="display:none"><h2 id="listtitle"></h2><div id="list"></div></div>
-
-<div id="boxwrap" style="display:none">
-  <h2>Inside the box — <span id="boxtitle"></span></h2>
-  <div class="card" id="box"></div>
-</div>
-
-<div id="portwrap">
-  <h2>The port — propose a change (the only way in)</h2>
-  <div class="card">
-    <div class="bar">
-      <select id="p-type">
-        <option value="assign">Give a day to…</option>
-        <option value="swap">Swap two days</option>
-        <option value="event">Add an event</option>
-      </select>
-      <span id="p-fields"></span>
-    </div>
-    <label>Note (your words travel with the proposal)</label>
-    <input id="p-note" style="width:100%" placeholder="e.g. work trip moved — can we trade?">
-    <label><input type="checkbox" id="p-tentative"> Tentative — I'm not sure yet, flagging it early</label>
-    <div class="bar">
-      <button id="p-submit">Propose as <span id="p-who"></span></button>
-      <span class="tag" id="p-counter-note" style="display:none"></span>
-      <button id="p-cancel-counter" style="display:none">cancel counter</button>
-    </div>
-    <p class="tag">A proposal changes nothing until the OTHER seat accepts it. Rejecting requires a reason — it stays attached forever. Questions and comments are first-class records too: open any day's box to ask one.</p>
-  </div>
-</div>
-
-<h2>The pull &amp; the proof</h2>
+<h2>Pull &amp; proof — artefacts out, and the re-fold</h2>
 <div class="card">
   <div class="bar">
-    <a id="pull" href="/pull?seat=mara" download><button>⬇ Pull my days (.ics)</button></a>
-    <button id="refold">Re-fold from the record</button>
-    <button id="reset">Reset the demo</button>
+    <a id="pull" href="#" download>⬇ Pull my .ics</a>
+    <span class="tag">— a copy to carry away; never a write back.</span>
   </div>
-  <div id="refoldout"></div>
-  <p class="tag">Pulling is free — a copy to carry to your own calendar, never a write back. The re-fold discards everything derived and rebuilds the month from the record alone: if the digest comes back identical, nothing but the record was ever carrying the truth.</p>
+  <div class="tag">Projection digest (sha256 over the folded grid — the pin every seat is looking at):</div>
+  <div class="digest" id="digest">…</div>
+  <div class="bar" style="margin-top:10px">
+    <button id="refold">Re-fold from the record alone</button>
+    <span id="refoldmsg" class="tag"></span>
+  </div>
+  <div class="bar">
+    <button id="reset">Reset demo to the seed record</button>
+    <span class="tag">— demo hygiene; the seed is the opening position.</span>
+  </div>
 </div>
 
-<h2>The record — everything, in the order it landed</h2>
+<h2>The record — everything that ever happened here</h2>
 <div id="feed"></div>
 
+<div class="card honest">
+  <b>Honest label.</b> This record lives in this instance's own store — it is
+  <i>an instance with the same operational fiction</i>, demonstrating the shape: a default that
+  derives, a record that accumulates, a grid that is a pure fold, seats rendered
+  server-side. The git-native substrate (git.pp, Cloudflare Artifacts) is its
+  sibling submission.
+</div>
+
 <footer>
-  <div class="card honest">
-    <b>Honest label.</b> The record on this page lives in this instance's own store (a Cloudflare Durable Object) — <i>an instance with the same operational fiction</i>, not the git substrate. What is being play-tested is the shape: a default that derives, an append-only record, a grid that is a pure fold, and seats that each render the same record at the resolution of where they sit. The coach's view is computed on the server: what the coach cannot see was never sent.
-  </div>
-  <p>Siblings: <a href="https://gitpp-desk.casey-digennaro.workers.dev">the captain's desk</a> (the same doctrine over git records) · <a href="https://github.com/SuperInstance/git.pp-ng">git.pp-ng</a> · <a href="https://github.com/SuperInstance/git.pp-desk">git.pp-desk</a> · this page: git.pp-grid (MIT © 2026 SuperInstance).</p>
+  Built by SuperInstance. The engine: cells · a default rule as data · an append-only
+  record · proposals as colored pending deltas · seats as server-side projections ·
+  ports that pull or append · insides that explain · a re-fold with a digest.
+  Instances are config — this page's whole world is one entry in the registry.
+  Part of the git.pp family, built for Cloudflare's next-gen git platform brief.
 </footer>
 
 <script>
-"use strict";
-var SEATS = {
-  mara: { name: "Mara", color: "#e08a3c" },
-  jonas: { name: "Jonas", color: "#4a90d9" }
-};
-var WEEKDAYS = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
-var seat = "mara", human = "mara", view = null, selectedDay = null, counterOf = null;
-var lastVersion = -1;
+var CFG = ${JSON.stringify(clientCfg)};
+var INSTANCE = CFG.id;
+var seatId = CFG.seats[0].id;
+var agentSeat = CFG.seats.filter(function (s) { return s.kind === "agent"; })[0];
+var pagerSeat = CFG.seats.filter(function (s) { return s.kind === "pager"; })[0];
+var human = agentSeat ? agentSeat.person : null;
+var pagerRow = pagerSeat ? pagerSeat.row : CFG.rows[0].id;
+var view = null;
+var cellMap = {};
 
-function esc(s) {
-  return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
-    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
-  });
-}
 function $(id) { return document.getElementById(id); }
-function dayNum(date) { return Number(date.slice(8, 10)); }
-function evIcon(kind) { return kind === "soccer" ? "⚽" : kind === "snack" ? "🍊" : "•"; }
+function esc(s) { return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;"); }
+function pname(id) { return id == null ? "nobody" : ((CFG.people[id] || {}).name || id); }
+function pcolor(id) { return id == null ? "#da3633" : ((CFG.people[id] || {}).color || "#666"); }
+function specOf(id) { return CFG.seats.filter(function (s) { return s.id === id; })[0]; }
+function actingPerson() { var el = $("actingseat"); return el ? el.value : CFG.seats.filter(function (s) { return s.kind === "person"; })[0].person; }
 
-function api(seatOverride) {
-  var s = seatOverride || seat;
-  var q = "/api/grid?seat=" + s + (s === "agent" ? "&for=" + human : "");
-  return fetch(q).then(function (r) { return r.json(); });
-}
-function act(body) {
-  return fetch("/api/grid", {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body)
-  }).then(function (r) { return r.json(); }).then(function (j) {
-    if (j.error) { alert(j.error); throw new Error(j.error); }
-    return j;
-  });
+async function getView() {
+  var q = "/api/grid?instance=" + INSTANCE + "&seat=" + encodeURIComponent(seatId);
+  var spec = specOf(seatId);
+  if (spec && spec.kind === "agent") q += "&for=" + encodeURIComponent(human);
+  if (spec && spec.kind === "pager") q += "&row=" + encodeURIComponent(pagerRow);
+  var r = await fetch(q);
+  return r.json();
 }
 
-function load() {
-  return api().then(function (v) {
-    view = v;
-    render();
-  });
+async function post(action, extra) {
+  var body = { instance: INSTANCE, action: action, seat: actingPerson() };
+  Object.keys(extra || {}).forEach(function (k) { body[k] = extra[k]; });
+  var r = await fetch("/api/grid", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  return r.json();
 }
 
-/* ---------- render ---------- */
-function render() {
-  document.querySelectorAll("#seatbar .seat[data-seat]").forEach(function (b) {
-    b.classList.toggle("on", b.getAttribute("data-seat") === seat);
+async function render() {
+  view = await getView();
+  if (view.error) { $("main").innerHTML = '<div class="card">' + esc(view.error) + "</div>"; return; }
+  $("digest").textContent = view.digest || "—";
+  document.querySelectorAll("#seatbar .seat").forEach(function (b) {
+    b.classList.toggle("on", b.dataset.seat === seatId);
   });
-  document.querySelectorAll("#agentfor .seat").forEach(function (b) {
-    b.classList.toggle("on", b.getAttribute("data-human") === human);
-  });
-  $("agentfor").style.display = seat === "agent" ? "" : "none";
-  var isParent = seat === "mara" || seat === "jonas";
-  $("gridwrap").style.display = isParent ? "" : "none";
-  $("inboxwrap").style.display = isParent ? "" : "none";
-  $("portwrap").style.display = isParent ? "" : "none";
-  $("listwrap").style.display = isParent ? "none" : "";
-  $("pull").style.display = (isParent || seat === "agent") ? "" : "none";
-  if (isParent || seat === "agent") {
-    var who = seat === "agent" ? human : seat;
-    $("pull").setAttribute("href", "/pull?seat=" + who);
-    $("pull").querySelector("button").textContent = "⬇ Pull " + (seat === "agent" ? SEATS[human].name + "'s" : "my") + " days (.ics)";
-  }
-  if (!view) return;
-  if (view.rule) $("ruletext").textContent = view.rule;
-  $("digestline").textContent = view.digest ? "grid digest " + view.digest.slice(0, 12) + "…" : "";
-  if (isParent) { renderMonth(); renderInbox(); renderFeed(); if (selectedDay) openBox(selectedDay, true); }
-  else if (seat === "coach") renderCoach();
-  else renderAgent();
-  $("p-who").textContent = isParent ? SEATS[seat].name : "";
+  var spec = specOf(seatId);
+  $("humanbar").style.display = spec && spec.kind === "agent" ? "" : "none";
+  $("pagerbar").style.display = spec && spec.kind === "pager" ? "" : "none";
+  renderInbox();
+  renderFeed();
+  if (view.view === "grid") renderGrid();
+  else if (view.view === "events") renderEvents();
+  else if (view.view === "aggregate") renderAggregate();
+  else if (view.view === "list") renderList();
+  else if (view.view === "pager") renderPager();
+  updatePull();
 }
 
-function renderMonth() {
-  var el = $("month"); el.innerHTML = "";
-  var first = new Date(Date.UTC(2026, 9, 1)).getUTCDay(); // Oct 1 2026 = Thursday (4)
-  for (var i = 0; i < first; i++) { var b = document.createElement("div"); b.className = "blank"; el.appendChild(b); }
-  view.days.forEach(function (d) {
-    var c = document.createElement("div");
-    c.className = "cell" + (d.date === "2026-10-13" ? " today" : "");
-    var col = SEATS[d.responsible].color;
-    c.style.background = "linear-gradient(180deg, " + col + "2e, " + col + "12)";
-    c.style.borderLeft = "4px solid " + col;
-    var h = '<span class="num">' + dayNum(d.date) + "</span> " +
-      '<span class="who">' + esc(SEATS[d.responsible].name) + "</span>";
-    if (d.responsible !== d.defaultResponsible) h += '<span class="moved" title="moved off the default by an accepted proposal">◦ moved</span>';
-    d.events.slice(0, 3).forEach(function (ev) {
-      h += '<div class="ev">' + evIcon(ev.kind) + " " + esc(ev.time ? ev.time + " " : "") + esc(ev.title) + "</div>";
-    });
-    if (d.events.length > 3) h += '<div class="ev">+' + (d.events.length - 3) + " more</div>";
-    if (d.pending.length) {
-      h += '<div class="pend">⏳ ' + d.pending.length + " pending — " +
-        esc(d.pending.map(function (p) { return p.summary; }).join("; ")) + "</div>";
-    }
-    c.innerHTML = h;
-    c.addEventListener("click", function () { openBox(d.date); });
-    el.appendChild(c);
-  });
-}
-
-function proposalButtons(p) {
-  if (seat === p.author) return '<span class="tag">awaiting ' + esc(SEATS[p.author === "mara" ? "jonas" : "mara"].name) + " — you proposed this</span>";
-  return '<button data-act="accept" data-id="' + p.id + '">Accept</button> ' +
-    '<button data-act="reject" data-id="' + p.id + '">Reject…</button> ' +
-    '<button data-act="counter" data-id="' + p.id + '">Counter…</button>';
+function updatePull() {
+  var a = $("pull");
+  if (view.view === "grid") { a.style.display = ""; a.href = "/pull?instance=" + INSTANCE + "&seat=" + view.person; a.textContent = "⬇ Pull " + pname(view.person) + "'s .ics"; }
+  else if (view.view === "list") { a.style.display = ""; a.href = "/pull?instance=" + INSTANCE + "&seat=" + human; a.textContent = "⬇ Pull " + pname(human) + "'s .ics"; }
+  else a.style.display = "none";
 }
 
 function renderInbox() {
-  var el = $("inbox"); el.innerHTML = "";
-  if (!view.inbox.length) { el.innerHTML = '<div class="card">Nothing waiting. Silence = the default holds.</div>'; return; }
-  view.inbox.forEach(function (item) {
-    var div = document.createElement("div");
-    div.className = "card ding" + (item.type === "resolved-yours" ? " res" : "");
-    var h = "🔔 " + esc(item.text);
-    if (item.type === "pending-yours" && item.proposalId) {
-      var p = view.proposals.find(function (x) { return x.id === item.proposalId; });
-      if (p) h += '<div class="bar" style="margin-top:6px">' + proposalButtons(p) + "</div>";
+  var box = $("inbox");
+  if (!view.inbox) { box.innerHTML = ""; return; }
+  if (!view.inbox.length) { box.innerHTML = '<h2>Inbox</h2><div class="card"><span class="tag">Nothing waiting on ' + esc(pname(view.person)) + '.</span></div>'; return; }
+  var h = "<h2>Inbox — waiting on " + esc(pname(view.person)) + "</h2>";
+  view.inbox.forEach(function (it) {
+    h += '<div class="card ding' + (it.type === "resolved-yours" ? " res" : "") + '">' + esc(it.text);
+    if (it.type === "pending-yours" && it.proposalId) {
+      h += '<div class="bar" style="margin:6px 0 0">' +
+        '<button onclick="rule(\'accept\',\'' + it.proposalId + '\')">Accept</button>' +
+        '<button onclick="rule(\'reject\',\'' + it.proposalId + '\')">Reject…</button>' +
+        '<button onclick="prefillCounter(\'' + it.proposalId + '\')">Counter</button></div>';
     }
-    div.innerHTML = h;
-    el.appendChild(div);
+    h += "</div>";
   });
-  wireButtons(el);
-}
-
-function renderCoach() {
-  $("listtitle").textContent = "Coach — game & snack days only (the custody pattern was never sent)";
-  var el = $("list"); el.innerHTML = "";
-  if (!view.days.length) { el.innerHTML = '<div class="card">No game days on the record.</div>'; return; }
-  view.days.forEach(function (d) {
-    var div = document.createElement("div"); div.className = "card";
-    var h = "<b>" + esc(d.weekday) + " " + esc(d.date) + "</b>";
-    d.events.forEach(function (ev) {
-      h += '<div class="ev">' + evIcon(ev.kind) + " " + esc(ev.time ? ev.time + " " : "") + esc(ev.title) +
-        (ev.duty ? ' <span class="tag">(' + esc(ev.duty) + ")</span>" : "") + "</div>";
-    });
-    div.innerHTML = h; el.appendChild(div);
-  });
-}
-
-function renderAgent() {
-  $("listtitle").textContent = "Agent for " + SEATS[human].name + " — dings, no grid";
-  var el = $("list"); el.innerHTML = "";
-  view.items.forEach(function (it) {
-    var div = document.createElement("div"); div.className = "card";
-    div.innerHTML = (it.kind === "ding" ? "🔔 " : "▸ ") + "<b>" + esc(it.date || "now") + "</b> " + esc(it.text);
-    el.appendChild(div);
-  });
-  if (!view.items.length) el.innerHTML = '<div class="card">No dings. The default is carrying everything.</div>';
+  box.innerHTML = h;
 }
 
 function renderFeed() {
-  var el = $("feed"); el.innerHTML = "";
-  view.feed.forEach(function (f) {
-    var div = document.createElement("div");
-    div.className = "hist";
-    var who = f.author === "system" ? "the record" : SEATS[f.author].name;
-    var line = '<span class="kind ' + f.kind + '">' + f.kind + "</span> <b>" + esc(who) + "</b> · " + esc(f.summary);
-    if (f.kind === "reject" && f.reason) line += ' · <span class="reason">reason: “' + esc(f.reason) + "”</span>";
-    div.innerHTML = line + ' <span class="tag">' + esc(f.id) + " · " + esc(f.ts.slice(0, 10)) + "</span>";
-    el.appendChild(div);
-  });
-}
-
-/* ---------- the box ---------- */
-function openBox(date, keepScroll) {
-  selectedDay = date;
-  var d = view.days.find(function (x) { return x.date === date; });
-  if (!d) return;
-  var box = d.box;
-  $("boxwrap").style.display = "";
-  $("boxtitle").textContent = WEEKDAYS[new Date(date + "T12:00:00Z").getUTCDay()] + " " + date;
+  var box = $("feed");
+  if (!view.feed) { box.innerHTML = '<span class="tag">This seat does not receive the feed — its scope is narrower than the record.</span>'; return; }
   var h = "";
-  h += "<p><b>The description.</b> " + esc(box.defaultLine) + "</p>";
-  h += "<p>" + esc(box.standingLine) + "</p>";
-  if (box.events.length) {
-    h += "<p><b>On this day:</b></p>";
-    box.events.forEach(function (ev) {
-      h += '<div class="ev">' + evIcon(ev.kind) + " " + esc(ev.time ? ev.time + " " : "") + esc(ev.title) +
-        (ev.for ? ' <span class="tag">(duty: ' + esc(SEATS[ev.for].name) + ")</span>" : "") +
-        ' <button data-act="optin" data-day="' + date + '" data-title="' + esc(ev.title) + '">🔔 remind me</button></div>';
-    });
-  }
-  if (box.pending.length) {
-    h += "<p><b>Pending — a color, not a fact:</b></p>";
-    box.pending.forEach(function (p) {
-      h += '<div class="card" style="margin:6px 0">⏳ <b>' + esc(SEATS[p.author].name) + "</b> proposed: " + esc(p.summary) +
-        (p.tentative ? ' <span class="kind">tentative</span>' : "") +
-        (p.note ? '<div>“' + esc(p.note) + '”</div>' : "") +
-        '<div class="bar">' + proposalButtons(p) + "</div></div>";
-    });
-  }
-  h += "<p><b>The equation — every record that touched this day:</b></p>";
-  if (!box.history.length) h += '<p class="tag">Nothing. The default has never been disturbed here.</p>';
-  box.history.forEach(function (x) {
-    var struck = x.kind === "proposal" && view.proposals.some(function (p) { return p.id === x.id && p.status === "rejected"; });
-    h += '<div class="hist"><span class="kind ' + x.kind + '">' + x.kind + '</span> <span class="' + (struck ? "strike" : "") + '">' + esc(x.summary) + "</span>" +
-      (x.reason ? ' <span class="reason">— reason: “' + esc(x.reason) + '”</span>' : "") +
-      ' <span class="tag">' + esc(x.id) + " · " + esc(x.ts.slice(0, 10)) + "</span></div>";
+  view.feed.slice().reverse().forEach(function (e) {
+    h += '<div class="hist"><span class="kind ' + e.kind + '">' + e.kind + '</span> ' + esc(e.summary) +
+      (e.reason ? ' <span class="reason">— "' + esc(e.reason) + '"</span>' : "") +
+      ' <span class="tag">' + esc(e.id) + " · " + esc(e.ts.slice(0, 10)) + "</span></div>";
   });
-  h += '<div class="bar" style="margin-top:10px">' +
-    '<input id="q-text" placeholder="Ask a question or leave a comment about this day…" style="flex:1">' +
-    '<button data-act="question" data-day="' + date + '">Ask</button>' +
-    '<button data-act="comment" data-day="' + date + '">Comment</button></div>';
+  box.innerHTML = h || '<span class="tag">The record is empty.</span>';
+}
+
+function cellHtml(rowId, c) {
+  var cls = "cell" + (c.date === CFG.now ? " today" : "") + (c.value == null ? " gap" : "") + (c.freeze ? " frozen" : "");
+  var bg = c.value == null ? "" : ' style="background:' + pcolor(c.value) + '2b"';
+  var h = '<div class="' + cls + '"' + bg + ' onclick="openBox(\'' + rowId + "','" + c.date + '\')">';
+  h += '<span class="num">' + Number(c.date.slice(8)) + "</span>";
+  if (c.value !== c.defaultValue) h += '<span class="moved">◦ moved</span>';
+  h += '<div class="who">' + (c.value == null ? "⚠ UNCOVERED" : esc(pname(c.value))) + (c.freeze ? " 🔒" : "") + "</div>";
+  c.events.forEach(function (ev) { h += '<div class="ev">▸ ' + esc(ev.title) + (ev.time ? " " + esc(ev.time) : "") + "</div>"; });
+  if (c.pending && c.pending.length) h += '<div class="pend">◌ ' + c.pending.length + " pending</div>";
+  return h + "</div>";
+}
+
+function renderGrid() {
+  cellMap = {};
+  var h = "";
+  var DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  view.rows.forEach(function (row) {
+    row.cells.forEach(function (c) { cellMap[row.id + "|" + c.date] = c; });
+    if (view.rows.length > 1) h += "<h2>" + esc(row.label) + " — " + esc(view.periodLabel) + "</h2>";
+    h += '<div class="dow">' + DOW.map(function (d) { return "<div>" + d + "</div>"; }).join("") + "</div>";
+    h += '<div class="month">';
+    var firstDow = new Date(row.cells[0].date + "T00:00:00Z").getUTCDay();
+    for (var i = 0; i < firstDow; i++) h += '<div class="blank"></div>';
+    row.cells.forEach(function (c) { h += cellHtml(row.id, c); });
+    h += "</div>";
+  });
+  h += '<div class="legend">The big color is who stands on the cell. ◦ moved = an accepted proposal moved it off the default. 🔒 = under a freeze. ⚠ = a gap — nobody stands there.</div>';
+  h += '<div class="legend">People:' + Object.keys(CFG.people).map(function (id) { return '<span class="swatch" style="background:' + CFG.people[id].color + '"></span>' + esc(CFG.people[id].name); }).join("") + "</div>";
+  $("main").innerHTML = h;
+}
+</script>
+
+<script>
+function renderEvents() {
+  var h = "<h2>" + esc(specOf(seatId).label) + " — the only days in this seat</h2>";
+  h += '<div class="tag" style="margin-bottom:8px">This payload contains no responsibility field at all — open the network tab and check. Absence, not hiding.</div>';
+  if (!view.days.length) h += '<div class="card">No matching days.</div>';
+  view.days.forEach(function (d) {
+    h += '<div class="card"><b>' + esc(d.weekday) + " " + esc(d.date) + "</b>";
+    d.events.forEach(function (ev) {
+      h += '<div class="hist">▸ ' + esc(ev.title) + (ev.time ? " at " + esc(ev.time) : "") + (ev.duty ? ' <span class="tag">(' + esc(ev.duty) + ")</span>" : "") + "</div>";
+    });
+    h += "</div>";
+  });
+  $("main").innerHTML = h;
+}
+
+function renderAggregate() {
+  var h = "<h2>Coverage by row — aggregates only</h2>";
+  h += '<div class="tag" style="margin-bottom:8px">This seat\'s payload contains no names, no notes, no history — only coverage, gaps and pending counts. That is what the office schedules from.</div>';
+  h += '<div class="card"><table class="agg"><tr><th>row</th><th>covered</th><th>gaps</th><th>pending</th><th>status</th></tr>';
+  view.rows.forEach(function (r) {
+    h += "<tr><td>" + esc(r.label) + "</td><td>" + r.covered + " / " + r.total + "</td><td>" +
+      (r.gaps.length ? esc(r.gaps.join(", ")) : "—") + "</td><td>" + r.pending + "</td><td>" + esc(r.status) + "</td></tr>";
+  });
+  h += "</table><div class='tag' style='margin-top:6px'>Pending proposals across all rows: " + view.pendingCount + "</div></div>";
+  $("main").innerHTML = h;
+}
+
+function renderList() {
+  var h = "<h2>Dings for " + esc(pname(human)) + " — no grid, just what they need</h2>";
+  if (!view.items.length) h += '<div class="card">Nothing.</div>';
+  view.items.forEach(function (it) {
+    h += '<div class="card ding">' + (it.date ? "<b>" + esc(it.date) + "</b> · " : "") + '<span class="kind">' + esc(it.kind) + "</span> " + esc(it.text) + "</div>";
+  });
+  $("main").innerHTML = h;
+}
+
+function renderPager() {
+  var h = "<h2>The pager pull — one row, the next 72 hours</h2>";
+  h += '<div class="tag" style="margin-bottom:8px">Window: ' + esc(view.window.from) + " → " + esc(view.window.to) + " (handover " + esc(CFG.now) + " at the instance handover time). A machine reads this, not a person.</div>";
+  h += '<div class="card">';
+  view.entries.forEach(function (en) {
+    h += '<div class="hist"><b>' + esc(en.date) + "</b> — " + esc(en.name) + (en.handle ? ' <span class="tag">page: ' + esc(en.handle) + "</span>" : "") + "</div>";
+  });
+  h += "</div>";
+  $("main").innerHTML = h;
+}
+
+function openBox(rowId, date) {
+  var c = cellMap[rowId + "|" + date];
+  if (!c) return;
+  var b = c.box;
+  var h = "<b>" + esc(date) + " · " + esc(rowId) + "</b>";
+  h += '<div class="hist">' + esc(b.defaultLine) + "</div>";
+  h += '<div class="hist">' + esc(b.standingLine) + "</div>";
+  if (b.freezeLine) h += '<div class="hist" style="color:#f0d48a">🔒 ' + esc(b.freezeLine) + "</div>";
+  b.events.forEach(function (ev) {
+    h += '<div class="hist">▸ ' + esc(ev.title) + (ev.time ? " at " + esc(ev.time) : "") +
+      ' <span class="tag">(' + esc(ev.kind) + (ev.for ? ", " + esc(pname(ev.for)) : "") + ")</span>";
+    if (view.view === "grid") h += ' <button onclick="optin(\'' + date + "','" + esc(ev.title).replace(/'/g, "\\'") + "','" + rowId + '\')">remind me</button>';
+    h += "</div>";
+  });
+  b.pending.forEach(function (p) {
+    h += '<div class="card ding"><span class="kind proposal">pending</span> ' + esc(p.summary) + " — proposed by " + esc(pname(p.author)) +
+      (p.tentative ? " (tentative)" : "") + (p.note ? '<br><span class="tag">“' + esc(p.note) + '”</span>' : "");
+    if (p.author !== view.person) {
+      h += '<div class="bar" style="margin:6px 0 0"><button onclick="rule(\'accept\',\'' + p.id + '\')">Accept</button>' +
+        '<button onclick="rule(\'reject\',\'' + p.id + '\')">Reject…</button>' +
+        '<button onclick="prefillCounter(\'' + p.id + '\')">Counter</button></div>';
+    } else h += '<div class="tag">Yours — it waits for another seat to rule.</div>';
+    h += "</div>";
+  });
+  h += '<div style="margin-top:8px"><input id="bq" placeholder="ask a question or comment on this cell…" style="width:70%">' +
+    ' <button onclick="boxSay(\'' + rowId + "','" + date + '\',\'question\')">Ask</button>' +
+    ' <button onclick="boxSay(\'' + rowId + "','" + date + '\',\'comment\')">Comment</button></div>';
+  h += "<h2 style='margin-top:14px'>The equation — every record that touched this cell</h2>";
+  if (!b.history.length) h += '<span class="tag">Nothing has touched this cell. The default is the whole story.</span>';
+  b.history.forEach(function (x) {
+    var struck = x.kind === "proposal" && b.history.some(function (y) { return y.kind === "reject" && y.summary.indexOf(x.id) >= 0; });
+    h += '<div class="hist' + (struck ? " strike" : "") + '"><span class="kind ' + x.kind + '">' + x.kind + "</span> " + esc(x.summary) +
+      (x.reason ? ' <span class="reason">— "' + esc(x.reason) + '"</span>' : "") +
+      ' <span class="tag">' + esc(x.id) + " · " + esc(x.author) + "</span></div>";
+  });
   $("box").innerHTML = h;
-  wireButtons($("box"));
-  if (!keepScroll) $("boxwrap").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  $("box").scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
-function wireButtons(root) {
-  root.querySelectorAll("button[data-act]").forEach(function (b) {
-    b.addEventListener("click", function () { doAction(b); });
-  });
-}
-
-function doAction(b) {
-  var a = b.getAttribute("data-act"), id = b.getAttribute("data-id");
-  if (a === "accept") act({ seat: seat, action: "accept", proposalId: id }).then(load);
-  else if (a === "reject") {
-    var reason = prompt("Reject — your reason stays attached to this day forever:");
-    if (reason) act({ seat: seat, action: "reject", proposalId: id, reason: reason }).then(load);
-  } else if (a === "counter") {
-    counterOf = id;
-    $("p-counter-note").style.display = "";
-    $("p-counter-note").textContent = "Countering " + id + " — your proposal replaces it.";
-    $("p-cancel-counter").style.display = "";
-    $("portwrap").scrollIntoView({ behavior: "smooth" });
-  } else if (a === "optin") {
-    act({ seat: seat, action: "optin", day: b.getAttribute("data-day"), title: b.getAttribute("data-title") }).then(load);
-  } else if (a === "question" || a === "comment") {
-    var t = $("q-text").value.trim();
-    if (!t) return;
-    act({ seat: seat, action: a, text: t, day: b.getAttribute("data-day") }).then(load);
+async function rule(action, pid) {
+  var extra = { proposalId: pid };
+  if (action === "reject") {
+    var reason = prompt("Reject — with a reason. It stays attached forever:");
+    if (!reason || !reason.trim()) { alert("A rejection must carry a reason."); return; }
+    extra.reason = reason;
   }
+  var r = await post(action, extra);
+  if (r.error) alert(r.error);
+  await render();
 }
 
-/* ---------- the propose form ---------- */
-function renderProposalFields() {
-  var t = $("p-type").value, f = $("p-fields");
-  var day = '<input type="date" id="p-day" min="2026-10-01" max="2026-10-31" value="2026-10-20">';
+function prefillCounter(pid) {
+  $("pcounter").checked = true;
+  $("pcounterid").value = pid;
+  $("port").scrollIntoView({ behavior: "smooth" });
+}
+
+async function boxSay(rowId, date, kind) {
+  var text = $("bq").value;
+  if (!text.trim()) return;
+  var r = await post(kind, { text: text, day: date, row: rowId });
+  if (r.error) alert(r.error);
+  await render();
+}
+
+async function optin(date, title, rowId) {
+  var r = await post("optin", { day: date, title: title, row: rowId });
+  if (r.error) alert(r.error);
+  await render();
+}
+</script>
+
+<script>
+function rowOptions(sel) {
+  return CFG.rows.map(function (r) { return '<option value="' + r.id + '"' + (r.id === sel ? " selected" : "") + ">" + esc(r.label) + "</option>"; }).join("");
+}
+function peopleOptions(sel, allowNone) {
+  var h = allowNone ? '<option value="">— nobody (drop coverage)</option>' : "";
+  return h + Object.keys(CFG.people).map(function (id) { return '<option value="' + id + '"' + (id === sel ? " selected" : "") + ">" + esc(CFG.people[id].name) + "</option>"; }).join("");
+}
+function dateInput(id, val) {
+  return '<input type="date" id="' + id + '" value="' + val + '" min="' + CFG.month + '-01" max="' + CFG.month + '-31">';
+}
+
+function buildFields() {
+  var t = $("ptype").value;
+  var h = "";
   if (t === "assign") {
-    f.innerHTML = day + ' → <select id="p-to"><option value="mara">Mara</option><option value="jonas">Jonas</option></select>';
+    h = '<label>row <select id="prow">' + rowOptions(CFG.rows[0].id) + "</select></label>" +
+      "<label>day " + dateInput("pday", CFG.now) + "</label>" +
+      '<label>assign to <select id="pto">' + peopleOptions("", true) + "</select></label>";
   } else if (t === "swap") {
-    f.innerHTML = day + ' ↔ <input type="date" id="p-day2" min="2026-10-01" max="2026-10-31" value="2026-10-27">';
+    h = '<label>first: row <select id="prowa">' + rowOptions(CFG.rows[0].id) + "</select> day " + dateInput("pdaya", CFG.now) + "</label>" +
+      '<label>second: row <select id="prowb">' + rowOptions(CFG.rows[0].id) + "</select> day " + dateInput("pdayb", CFG.now) + "</label>";
   } else {
-    f.innerHTML = day + ' <input id="p-title" placeholder="event title"> <input id="p-time" placeholder="18:00" size="5"> ' +
-      '<select id="p-ekind"><option value="event">event</option><option value="soccer">soccer</option><option value="snack">snack duty</option></select>';
+    h = '<label>row <select id="prow">' + rowOptions(CFG.rows[0].id) + "</select></label>" +
+      "<label>day " + dateInput("pday", CFG.now) + "</label>" +
+      '<label>title <input id="ptitle" placeholder="e.g. launch review"></label>' +
+      '<label>time <input id="ptime" size="6" placeholder="10:00"></label>' +
+      '<label>kind <input id="pkind" size="10" value="event"></label>';
   }
+  $("pfields").innerHTML = h;
 }
-$("p-type").addEventListener("change", renderProposalFields);
-$("p-submit").addEventListener("click", function () {
-  var t = $("p-type").value, change;
-  if (t === "assign") change = { type: "assign", day: $("p-day").value, to: $("p-to").value };
-  else if (t === "swap") change = { type: "swap", days: [$("p-day").value, $("p-day2").value] };
-  else change = { type: "event", day: $("p-day").value, title: $("p-title").value, time: $("p-time").value || undefined, eventKind: $("p-ekind").value };
-  var body = { seat: seat, note: $("p-note").value, tentative: $("p-tentative").checked, change: change };
-  if (counterOf) { body.action = "counter"; body.proposalId = counterOf; }
-  else body.action = "propose";
-  act(body).then(function () {
-    counterOf = null;
-    $("p-counter-note").style.display = "none";
-    $("p-cancel-counter").style.display = "none";
-    $("p-note").value = "";
-    load();
-  });
-});
-$("p-cancel-counter").addEventListener("click", function () {
-  counterOf = null;
-  $("p-counter-note").style.display = "none";
-  $("p-cancel-counter").style.display = "none";
-});
 
-/* ---------- seats ---------- */
-document.querySelectorAll("#seatbar .seat[data-seat]").forEach(function (b) {
-  b.addEventListener("click", function () { seat = b.getAttribute("data-seat"); selectedDay = null; $("boxwrap").style.display = "none"; load(); });
-});
-document.querySelectorAll("#agentfor .seat").forEach(function (b) {
-  b.addEventListener("click", function () { human = b.getAttribute("data-human"); load(); });
-});
+function readChange() {
+  var t = $("ptype").value;
+  if (t === "assign") return { type: "assign", row: $("prow").value, day: $("pday").value, to: $("pto").value || null };
+  if (t === "swap") return { type: "swap", a: { row: $("prowa").value, day: $("pdaya").value }, b: { row: $("prowb").value, day: $("pdayb").value } };
+  var c = { type: "event", row: $("prow").value, day: $("pday").value, title: $("ptitle").value, eventKind: $("pkind").value || "event" };
+  if ($("ptime").value) c.time = $("ptime").value;
+  return c;
+}
 
-/* ---------- the proof ---------- */
-$("refold").addEventListener("click", function () {
-  act({ action: "refold" }).then(function (j) {
-    $("refoldout").innerHTML =
-      '<p>before: <span class="digest">' + j.before + '</span></p>' +
-      '<p>after: <span class="digest">' + j.after + '</span> ' +
-      (j.identical ? '<span class="badge ok">IDENTICAL ✓</span>' : '<span class="badge bad">DIFFERENT ✗</span>') +
-      '</p><p class="tag">re-folded from ' + j.logLength + ' records — the log alone.</p>';
-    load();
-  });
-});
-$("reset").addEventListener("click", function () {
-  if (confirm("Reset the demo record to its seed? (The current record is replaced — this is demo hygiene, not editing.)")) {
-    act({ action: "reset" }).then(function () { selectedDay = null; $("boxwrap").style.display = "none"; load(); });
+$("ptype").addEventListener("change", buildFields);
+$("propose").addEventListener("click", async function () {
+  var change = readChange();
+  var note = $("pnote").value;
+  var r;
+  if ($("pcounter").checked && $("pcounterid").value.trim()) {
+    r = await post("counter", { proposalId: $("pcounterid").value.trim(), change: change, note: note });
+  } else {
+    r = await post("propose", { change: change, note: note, tentative: $("ptent").checked });
   }
+  $("pmsg").textContent = r.error ? r.error : "Recorded as " + r.entry.id + " — it is a color on the grid until another seat rules.";
+  if (!r.error) await render();
 });
 
-/* ---------- socket: pings only ---------- */
-try {
-  var proto = location.protocol === "https:" ? "wss://" : "ws://";
-  var ws = new WebSocket(proto + location.host + "/agents/grid/demo");
-  ws.onmessage = function (ev) {
-    try {
-      var msg = JSON.parse(ev.data);
-      if (msg.type === "cf_agent_state" && msg.state && typeof msg.state.version === "number") {
-        if (lastVersion >= 0 && msg.state.version !== lastVersion) load();
-        lastVersion = msg.state.version;
-      }
-      if (msg.type === "cf_agent_identity") { $("wsdot").className = "dot on"; $("wslabel").textContent = "live"; }
-    } catch (e) { /* not ours */ }
-  };
-  ws.onopen = function () { $("wsdot").className = "dot on"; $("wslabel").textContent = "live"; };
-  ws.onclose = function () { $("wsdot").className = "dot"; $("wslabel").textContent = "offline — refresh to update"; };
-} catch (e) { /* the page still works over HTTP */ }
+$("refold").addEventListener("click", async function () {
+  var r = await post("refold", {});
+  $("refoldmsg").innerHTML = r.identical
+    ? 'Re-folded ' + r.logLength + ' records from the log alone: <span class="badge ok">DIGEST IDENTICAL ✓</span>'
+    : '<span class="badge bad">DIGEST CHANGED ✗</span> — something other than the record was carrying state.';
+  if (r.after) $("digest").textContent = r.after;
+});
+$("reset").addEventListener("click", async function () {
+  if (!confirm("Reset this instance to its seed record?")) return;
+  await post("reset", {});
+  await render();
+});
 
-renderProposalFields();
-load();
+document.querySelectorAll("#seatbar .seat").forEach(function (b) {
+  b.addEventListener("click", function () { seatId = b.dataset.seat; render(); });
+});
+
+// Agent-seat human toggle + pager row select + acting-person select.
+(function init() {
+  var hb = $("humanbtns");
+  CFG.seats.filter(function (s) { return s.kind === "person"; }).forEach(function (s) {
+    var b = document.createElement("button");
+    b.textContent = CFG.people[s.person].name;
+    if (s.person === human) b.classList.add("on");
+    b.addEventListener("click", function () {
+      human = s.person;
+      hb.querySelectorAll("button").forEach(function (x) { x.classList.remove("on"); });
+      b.classList.add("on");
+      render();
+    });
+    hb.appendChild(b);
+  });
+  var pr = $("pagerrow");
+  CFG.rows.forEach(function (r) {
+    var o = document.createElement("option");
+    o.value = r.id; o.textContent = r.label;
+    if (r.id === pagerRow) o.selected = true;
+    pr.appendChild(o);
+  });
+  pr.addEventListener("change", function () {
+    pagerRow = pr.value;
+    $("pagerics").href = "/pull?instance=" + INSTANCE + "&seat=pager&row=" + pagerRow;
+    $("pagerjson").href = "/pull?instance=" + INSTANCE + "&seat=pager&row=" + pagerRow + "&format=json";
+    render();
+  });
+  $("pagerics").href = "/pull?instance=" + INSTANCE + "&seat=pager&row=" + pagerRow;
+  $("pagerjson").href = "/pull?instance=" + INSTANCE + "&seat=pager&row=" + pagerRow + "&format=json";
+  var act = document.createElement("div");
+  act.className = "bar";
+  act.innerHTML = '<span class="tag">acting as:</span> <select id="actingseat">' +
+    CFG.seats.filter(function (s) { return s.kind === "person"; }).map(function (s) {
+      return '<option value="' + s.person + '">' + esc(CFG.people[s.person].name) + "</option>";
+    }).join("") + "</select>";
+  $("acting").replaceWith(act);
+  buildFields();
+})();
+
+try {
+  var ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/agents/grid/" + INSTANCE);
+  ws.onopen = function () { $("wsdot").classList.add("on"); $("wslabel").textContent = "live — the record pings this page"; };
+  ws.onmessage = function () { render(); };
+  ws.onclose = function () { $("wsdot").classList.remove("on"); $("wslabel").textContent = "socket closed — refresh to reconnect"; };
+} catch (e) { /* the page still works by hand */ }
+
+render();
 </script>
 </body>
-</html>
-`;
+</html>`;
+}

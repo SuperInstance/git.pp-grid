@@ -1,1 +1,20 @@
-{"dependencies":{"agents":"^0.28.1"},"description":"The Grid — a shared month for two people, derived from a default and an append-only record. Proposals are colors, not facts; each seat renders the same record at its own resolution.","devDependencies":{"@cloudflare/workers-types":"^5.20261006.1","typescript":"^5.9.0","wrangler":"^4.150.0"},"name":"gitpp-grid","private":true,"scripts":{"deploy":"wrangler deploy","dev":"wrangler dev","typecheck":"tsc --noEmit"},"type":"module","version":"0.1.0"}
+{
+  "dependencies": {
+    "agents": "^0.28.1"
+  },
+  "description": "The Grid engine \u2014 cells, a default rule as data, an append-only record, coloured proposals, server-side seats, pull-only ports. Instances are config: on-call rotation (lead) and the shared month (custody).",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261006.1",
+    "typescript": "^5.9.0",
+    "wrangler": "^4.150.0"
+  },
+  "name": "gitpp-grid",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "typecheck": "tsc --noEmit"
+  },
+  "type": "module",
+  "version": "0.1.0"
+}

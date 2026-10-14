@@ -1,212 +1,396 @@
 /**
- * playtest.mjs — the Grid, played with honestly.
+ * playtest.mjs — the Grid's acceptance test, per instance.
  *
- * Run: node test/playtest.mjs
+ * Run against a live deployment:
+ *   GRID_URL=https://gitpp-grid.casey-digennaro.workers.dev node test/playtest.mjs
+ * (defaults to the production URL).
  *
- * Independence note: check (1) folds the record HERE, from the
- * spec — the default (Friday-anchor alternating weeks) plus the raw
- * log fetched from the deployment, applied by this file's own code.
- * The server's grid is never trusted to grade itself; the two folds
- * must agree on all 31 days, and five probe days must also match the
- * seed story's hand-computed values. Checks (2) and (3) then act
- * through the port (propose / accept / reject) and verify the record
- * grew by exactly the entries it should — no more, no fewer.
+ * The discipline, same as the desk's: THE SERVER NEVER GRADES
+ * ITSELF. Each section folds the raw record IN THE TEST, from the
+ * instance's declared rule written out in this file, and compares
+ * against the server's projections. If the two folds agree, the
+ * engine is honest; the probes then check the story the seed tells.
+ *
+ *   CUSTODY — the original instance, as regression: every check
+ *     that passed on the single-purpose build must still pass now
+ *     that custody is just config.
+ *   ON-CALL — the engineer-native instance: rotation derivation on
+ *     probe days, swap accept/reject flows, the freeze guard,
+ *     director seat name-freedom, the pager pull, scope seats,
+ *     re-fold per instance.
  */
+
 const BASE = process.env.GRID_URL ?? "https://gitpp-grid.casey-digennaro.workers.dev";
 
 let failures = 0;
-const check = (name, ok, detail) => {
-  console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? " — " + detail : ""}`);
-  if (!ok) failures++;
-};
-
-const getView = async (seat, extra = "") =>
-  (await fetch(`${BASE}/api/grid?seat=${seat}${extra}`)).json();
-const getLog = async () => (await (await fetch(`${BASE}/api/grid/log`)).json()).entries;
-const post = async (body) => {
-  const res = await fetch(`${BASE}/api/grid`, {
+let sectionName = "";
+let sectionPass = 0;
+let sectionTotal = 0;
+const totals = [];
+function section(name) {
+  if (sectionName) totals.push([sectionName, sectionPass, sectionTotal]);
+  sectionName = name;
+  sectionPass = 0;
+  sectionTotal = 0;
+  console.log(`\n== ${name} ==`);
+}
+function check(name, cond, detail = "") {
+  sectionTotal++;
+  if (cond) sectionPass++;
+  else failures++;
+  console.log(`${cond ? "PASS" : "FAIL"}  ${name}${cond ? "" : "  " + detail}`);
+}
+async function get(path) {
+  const r = await fetch(BASE + path);
+  return r.text();
+}
+async function getJson(path) {
+  return JSON.parse(await get(path));
+}
+async function post(instance, body) {
+  const r = await fetch(BASE + "/api/grid", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ instance, ...body }),
   });
-  return res.json();
-};
+  return r.json();
+}
 
-/* ---------- the independent fold (from the spec, not the server) ---------- */
-const DAY = 86_400_000;
-const ANCHOR = Date.UTC(2026, 9, 2); // Friday Oct 2 2026 → Mara's week
-const defResp = (date) => {
+/* ================================================================== */
+/* CUSTODY — regression: the original instance, now just config        */
+/* ================================================================== */
+
+section("custody (regression)");
+
+// The custody default, from the rule, written out independently:
+// 7-day blocks from Friday 2026-10-02 (block 0 = mara), Fri–Thu.
+const ANCHOR = Date.UTC(2026, 9, 2);
+function defResp(date) {
   const [y, m, d] = date.split("-").map(Number);
-  const block = Math.floor((Date.UTC(y, m - 1, d) - ANCHOR) / (7 * DAY));
-  return ((block % 2) + 2) % 2 === 0 ? "mara" : "jonas";
-};
-const DATES = Array.from({ length: 31 }, (_, i) => `2026-10-${String(i + 1).padStart(2, "0")}`);
-
-function fold(log) {
-  const resp = {};
-  for (const d of DATES) resp[d] = defResp(d);
-  const status = {};
-  const proposals = {};
-  for (const e of log) {
-    if (e.kind === "proposal" || e.kind === "counter") {
-      proposals[e.id] = e;
-      status[e.id] = "pending";
-    }
+  const block = Math.floor((Date.UTC(y, m - 1, d) - ANCHOR) / (7 * 86_400_000));
+  return block % 2 === 0 ? "mara" : "jonas";
+}
+function foldLog(entries) {
+  const state = {};
+  for (let d = 1; d <= 31; d++) {
+    const date = `2026-10-${String(d).padStart(2, "0")}`;
+    state[date] = defResp(date);
   }
-  for (const e of log) {
+  const props = {};
+  for (const e of entries) {
+    if (e.kind === "proposal" || e.kind === "counter")
+      props[e.id] = { change: e.payload.change, status: "pending" };
+  }
+  for (const e of entries) {
     const pid = e.payload.proposalId ?? e.payload.counterOf;
-    if (!pid || !proposals[pid]) continue;
-    if (e.kind === "accept") status[pid] = "accepted";
-    else if (e.kind === "reject") status[pid] = "rejected";
-    else if (e.kind === "counter") status[pid] = "countered";
+    if (!pid || !props[pid]) continue;
+    if (e.kind === "accept") props[pid].status = "accepted";
+    else if (e.kind === "reject") props[pid].status = "rejected";
+    else if (e.kind === "counter" && props[pid].status === "pending") props[pid].status = "countered";
   }
-  for (const e of log) {
+  for (const e of entries) {
     if (e.kind !== "accept") continue;
-    const p = proposals[e.payload.proposalId];
-    if (!p || status[p.id] !== "accepted") continue;
-    const c = p.payload.change;
-    if (c.type === "assign") resp[c.day] = c.to;
+    const p = props[e.payload.proposalId];
+    if (!p || p.status !== "accepted") continue;
+    const c = p.change;
+    if (c.type === "assign") state[c.day] = c.to;
     else if (c.type === "swap") {
-      const t = resp[c.days[0]];
-      resp[c.days[0]] = resp[c.days[1]];
-      resp[c.days[1]] = t;
+      const t = state[c.a.day];
+      state[c.a.day] = state[c.b.day];
+      state[c.b.day] = t;
     }
   }
-  return resp;
+  return state;
 }
 
-/* ---------- (1) the seeded grid matches an independent fold ---------- */
-const log0 = await getLog();
-const expected = fold(log0);
-const maraView = await getView("mara");
+const log1 = await getJson("/api/grid/log?instance=custody");
+const mine = foldLog(log1.entries);
+const maraView = await getJson("/api/grid?instance=custody&seat=mara");
 let agree = 0;
-for (const d of maraView.days) {
-  if (expected[d.date] === d.responsible) agree++;
-}
-check(
-  "1a. server grid == independent fold of default+record (all 31 days)",
-  agree === 31,
-  `${agree}/31 days agree`,
-);
-const story = {
-  "2026-10-01": "jonas", // Thursday before the anchor week
-  "2026-10-12": "mara", // swapped in (accepted proposal)
-  "2026-10-19": "jonas", // swapped out
-  "2026-10-26": "jonas", // pending proposal changes nothing
-  "2026-10-31": "mara", // rejected proposal changes nothing
-};
-const storyOk = Object.entries(story).every(
-  ([d, who]) => expected[d] === who && maraView.days.find((x) => x.date === d)?.responsible === who,
-);
-check("1b. five probe days match the seed story, hand-computed", storyOk, JSON.stringify(story));
+for (const day of maraView.days) if (day.responsible === mine[day.date]) agree++;
+check("1a server grid == independent fold of the raw log (31/31 days)", agree === 31, `${agree}/31`);
 
-/* ---------- (2) propose → accept, through the port ---------- */
-const n0 = (await getLog()).length;
-const prop = await post({
-  seat: "jonas",
+const probe = { "2026-10-01": "jonas", "2026-10-12": "mara", "2026-10-19": "jonas", "2026-10-26": "jonas", "2026-10-31": "mara" };
+const badProbes = Object.entries(probe).filter(
+  ([d, want]) => maraView.days.find((x) => x.date === d)?.responsible !== want,
+);
+check("1b probe days: Oct 1 jonas · swapped 12 mara · 19 jonas · pending 26 jonas · rejected 31 mara", badProbes.length === 0, JSON.stringify(badProbes));
+
+// A fresh proposal is a COLOR, not a fact — then an accept lands it.
+const before = await getJson("/api/grid/log?instance=custody");
+const prop = await post("custody", {
+  seat: "mara",
   action: "propose",
   change: { type: "assign", day: "2026-10-06", to: "jonas" },
-  note: "playtest: dentist trip",
+  note: "playtest: school play rehearsal runs late",
 });
-const n1 = (await getLog()).length;
-check("2a. propose appends exactly one entry", prop.ok && n1 === n0 + 1, `log ${n0} → ${n1}`);
-const midView = await getView("mara");
+const afterProp = await getJson("/api/grid/log?instance=custody");
+check("2a propose appends exactly one record", prop.ok && afterProp.length === before.length + 1);
+const midView = await getJson("/api/grid?instance=custody&seat=mara");
 const midDay = midView.days.find((d) => d.date === "2026-10-06");
-check(
-  "2b. a pending proposal is a color, not a fact (day unmoved, proposal shown)",
-  midDay.responsible === "mara" && midDay.pending.some((p) => p.id === prop.entry.id),
-  `responsible=${midDay.responsible}, pending=${midDay.pending.length}`,
-);
-const acc = await post({ seat: "mara", action: "accept", proposalId: prop.entry.id });
-const n2 = (await getLog()).length;
-const afterView = await getView("jonas");
-const afterDay = afterView.days.find((d) => d.date === "2026-10-06");
-check(
-  "2c. accept appends exactly one entry and the day lands",
-  acc.ok && n2 === n1 + 1 && afterDay.responsible === "jonas",
-  `log ${n1} → ${n2}, 2026-10-06 = ${afterDay.responsible}`,
-);
+check("2b pending is a color, not a fact (Oct 6 still mara, proposal shown)",
+  midDay.responsible === "mara" && midDay.pending.length === 1);
+const acc = await post("custody", { seat: "jonas", action: "accept", proposalId: prop.entry.id });
+const afterAcc = await getJson("/api/grid?instance=custody&seat=mara");
+check("2c the other seat accepts → the day lands (Oct 6 = jonas)",
+  acc.ok && afterAcc.days.find((d) => d.date === "2026-10-06").responsible === "jonas");
 
-/* ---------- (3) reject: the day holds, the reason stays ---------- */
-const prop2 = await post({
+// A rejection changes nothing and keeps its reason in the box.
+const prop2 = await post("custody", {
   seat: "mara",
   action: "propose",
   change: { type: "assign", day: "2026-10-07", to: "jonas" },
-  note: "playtest: gallery thing",
+  note: "playtest: dentist",
 });
-const rej = await post({
+const rej = await post("custody", {
   seat: "jonas",
   action: "reject",
   proposalId: prop2.entry.id,
-  reason: "playtest: grandma is visiting",
+  reason: "playtest reason: that week is already upside down",
 });
-const n3 = (await getLog()).length;
-const v3 = await getView("mara");
+const v3 = await getJson("/api/grid?instance=custody&seat=mara");
 const day7 = v3.days.find((d) => d.date === "2026-10-07");
-const boxHist = day7.box.history.map((h) => `${h.kind}:${h.reason ?? h.summary}`);
-check(
-  "3. reject keeps the day at default, reason retrievable in the box",
-  rej.ok &&
-    n3 === n2 + 2 &&
-    day7.responsible === "mara" &&
-    boxHist.some((s) => s.startsWith("reject:playtest: grandma is visiting")),
-  `log ${n2} → ${n3}, 2026-10-07 = ${day7.responsible}, history has the reason`,
-);
+check("3 reject keeps the day at default; the reason is retrievable in the cell's box",
+  rej.ok && day7.responsible === "mara" &&
+    day7.box.history.some((h) => (h.reason ?? "").includes("upside down")));
 
-/* ---------- (4) coach: the payload never contained it ---------- */
-const coachRes = await fetch(`${BASE}/api/grid?seat=coach`);
-const coachText = await coachRes.text();
-check(
-  "4. coach payload: game days present, responsibility data absent",
-  !coachText.includes("responsible") &&
-    !coachText.includes("2026-10-05") &&
-    !coachText.includes("2026-10-12") &&
-    coachText.includes("2026-10-17") &&
-    coachText.includes("Snack duty"),
-  "no 'responsible', no non-event days, Oct 17 + snack duty present",
-);
+// The coach's payload: soccer days only, and NO responsibility field.
+const coach = await get("/api/grid?instance=custody&seat=coach");
+check("4 coach payload: no 'responsible', no ordinary days, has Oct 17 + snack duty",
+  !coach.includes("responsible") && !coach.includes("2026-10-05") && !coach.includes("2026-10-12") &&
+    coach.includes("2026-10-17") && coach.includes("Snack duty"));
 
-/* ---------- (6) the pull: my days, not yours ---------- */
-const parseIcs = (text) =>
-  text
-    .split("BEGIN:VEVENT")
-    .slice(1)
-    .map((b) => ({
-      start: (b.match(/DTSTART[^:\r\n]*:([0-9T]+)/) || [])[1],
-      summary: (b.match(/SUMMARY:(.*)/) || [])[1] ?? "",
-    }));
-const maraIcs = parseIcs(await (await fetch(`${BASE}/pull?seat=mara`)).text());
-const jonasIcs = parseIcs(await (await fetch(`${BASE}/pull?seat=jonas`)).text());
-const kidDay = (events, name, ymd) =>
-  events.some((e) => e.summary === `Kid with ${name}` && e.start === ymd);
-check(
-  "6a. mara's pull: has her swapped-in Oct 12, not her swapped-out Oct 19",
-  kidDay(maraIcs, "Mara", "20261012") && !kidDay(maraIcs, "Mara", "20261019"),
-);
-check(
-  "6b. jonas's pull: exactly inverse, plus his snack duty on Mara's day",
-  kidDay(jonasIcs, "Jonas", "20261019") &&
-    !kidDay(jonasIcs, "Jonas", "20261012") &&
-    jonasIcs.some((e) => e.summary.includes("Snack duty") && e.start.startsWith("20261017")),
-);
+// The re-fold: digest identical, derived from the log alone.
+const rf = await post("custody", { seat: "mara", action: "refold" });
+check("5 re-fold digest identical over the whole record", rf.identical === true && rf.before === rf.after);
 
-/* ---------- (5) re-fold from the record alone ---------- */
-const refold = await post({ action: "refold" });
-check(
-  "5. re-fold digest identical (the record alone carries the grid)",
-  refold.identical === true && refold.before === refold.after,
-  `digest ${String(refold.before).slice(0, 16)}… over ${refold.logLength} records`,
-);
+// Pulls: Mara's .ics and Jonas's are exactly inverse on swapped days.
+function icsMap(text) {
+  const out = {};
+  for (const ev of text.split("BEGIN:VEVENT").slice(1)) {
+    const dt = ev.match(/DTSTART;VALUE=DATE:(\d{8})/)?.[1];
+    const sum = ev.match(/SUMMARY:(.*)/)?.[1]?.trim();
+    if (dt && sum?.startsWith("Kid with")) out[dt] = sum;
+  }
+  return out;
+}
+const maraIcs = icsMap(await get("/pull?instance=custody&seat=mara"));
+const jonasIcs = icsMap(await get("/pull?instance=custody&seat=jonas"));
+check("6a pulls are inverse: Oct 12 with Mara, Oct 19 with Jonas, both ways",
+  maraIcs["20261012"] === "Kid with Mara" && jonasIcs["20261012"] === undefined &&
+    jonasIcs["20261019"] === "Kid with Jonas" && maraIcs["20261019"] === undefined);
+const maraText = await get("/pull?instance=custody&seat=mara");
+check("6b Jonas's snack duty rides along on Mara's Oct 17 (her day, his duty)",
+  maraText.includes("Snack duty") && maraText.includes("20261017"));
 
-/* ---------- (7) the page serves the story ---------- */
-const page = await (await fetch(`${BASE}/`)).text();
-check(
-  "7. page serves the claim, the rule, and the seats",
-  page.includes("derived, not discussed") &&
-    page.includes("Silence means the default holds") &&
-    page.includes("Coach · need-to-know") &&
-    page.includes("an instance with the same operational fiction"),
-);
+// The page carries the fiction's load-bearing sentences.
+const page = await get("/?instance=custody");
+check("7 page: 'derived, not discussed' · 'Silence means the default holds' · coach seat · honest label",
+  page.includes("derived, not discussed") && page.includes("Silence means the default holds") &&
+    page.includes("Coach · need-to-know") && page.includes("an instance with the same operational fiction"));
 
-console.log(failures ? `\n${failures} check(s) FAILED` : "\nAll checks passed.");
+/* ================================================================== */
+/* ON-CALL — the engineer-native instance                              */
+/* ================================================================== */
+
+section("oncall (lead)");
+
+// The rotations, written out independently from the rule:
+// 7-day blocks from Monday 2026-09-28; each service cycles its roster.
+const OC_ANCHOR = Date.UTC(2026, 8, 28);
+const OC_ORDER = {
+  api: ["priya", "tom", "ana"],
+  billing: ["tom", "ana"],
+  ingest: ["ana", "priya"],
+  search: ["leo", "priya"],
+};
+function ocDefault(row, date) {
+  const [y, m, d] = date.split("-").map(Number);
+  const block = Math.floor((Date.UTC(y, m - 1, d) - OC_ANCHOR) / (7 * 86_400_000));
+  const roster = OC_ORDER[row];
+  return roster[((block % roster.length) + roster.length) % roster.length];
+}
+function ocFold(entries) {
+  const state = {};
+  for (const row of Object.keys(OC_ORDER)) {
+    for (let d = 1; d <= 31; d++) {
+      const date = `2026-10-${String(d).padStart(2, "0")}`;
+      state[`${row}|${date}`] = ocDefault(row, date);
+    }
+  }
+  const props = {};
+  for (const e of entries) {
+    if (e.kind === "proposal" || e.kind === "counter")
+      props[e.id] = { change: e.payload.change, status: "pending" };
+  }
+  for (const e of entries) {
+    const pid = e.payload.proposalId ?? e.payload.counterOf;
+    if (!pid || !props[pid]) continue;
+    if (e.kind === "accept") props[pid].status = "accepted";
+    else if (e.kind === "reject") props[pid].status = "rejected";
+    else if (e.kind === "counter" && props[pid].status === "pending") props[pid].status = "countered";
+  }
+  for (const e of entries) {
+    if (e.kind !== "accept") continue;
+    const p = props[e.payload.proposalId];
+    if (!p || p.status !== "accepted") continue;
+    const c = p.change;
+    if (c.type === "assign") state[`${c.row}|${c.day}`] = c.to;
+    else if (c.type === "swap") {
+      const ka = `${c.a.row}|${c.a.day}`;
+      const kb = `${c.b.row}|${c.b.day}`;
+      const t = state[ka];
+      state[ka] = state[kb];
+      state[kb] = t;
+    }
+  }
+  return state;
+}
+const ocCell = (view, row, date) =>
+  view.rows.find((r) => r.id === row)?.cells.find((c) => c.date === date);
+
+const ocLog = await getJson("/api/grid/log?instance=oncall");
+const ocMine = ocFold(ocLog.entries);
+const samView = await getJson("/api/grid?instance=oncall&seat=sam");
+let ocAgree = 0;
+let ocCells = 0;
+for (const row of samView.rows) {
+  for (const c of row.cells) {
+    ocCells++;
+    if (c.value === ocMine[`${row.id}|${c.date}`]) ocAgree++;
+  }
+}
+check("O1a lead seat grid == independent fold of the raw log (124/124 cells)", ocAgree === ocCells && ocCells === 124, `${ocAgree}/${ocCells}`);
+
+const ocProbes = [
+  ["api", "2026-10-01", "priya"], // rotation block 0
+  ["api", "2026-10-12", "priya"], // accepted swap landed (was ana)
+  ["api", "2026-10-13", "ana"],
+  ["api", "2026-10-19", "ana"], // accepted swap landed (was priya)
+  ["api", "2026-10-20", "priya"],
+  ["billing", "2026-10-21", "ana"], // frozen; rejected swap moved nothing
+  ["ingest", "2026-10-24", "priya"], // pending coverage ask moves nothing
+  ["search", "2026-10-31", null], // accepted drop = a real gap
+  ["search", "2026-10-13", "leo"],
+];
+const ocBad = ocProbes.filter(([r, d, want]) => ocCell(samView, r, d)?.value !== want);
+check("O1b probe days: rotation + accepted swap + frozen reject + pending ask + the gap", ocBad.length === 0, JSON.stringify(ocBad));
+
+// Director seat: aggregates only — the payload must contain NO names.
+const dirText = await get("/api/grid?instance=oncall&seat=director");
+const dir = JSON.parse(dirText);
+const NAMES = ["Priya", "Nair", "Tom", "Becker", "Ana", "Ruiz", "Leo", "Park", "Sam", "Okafor",
+  '"priya"', '"tom"', '"ana"', '"leo"', '"sam"'];
+const leaks = NAMES.filter((n) => dirText.includes(n));
+check("O2a director payload contains no engineer names (grep)", leaks.length === 0, leaks.join(","));
+check("O2b director sees the gap + counts: search gap Oct 31, pending = 1",
+  dir.rows.find((r) => r.row === "search")?.gaps.join() === "2026-10-31" &&
+    dir.rows.find((r) => r.row === "api")?.covered === 31 &&
+    dir.pendingCount === 1,
+  JSON.stringify(dir.rows));
+
+// Scope seats: an engineer sees only their rotation's rows.
+const leoView = await getJson("/api/grid?instance=oncall&seat=leo");
+const tomView = await getJson("/api/grid?instance=oncall&seat=tom");
+check("O3 scope: Leo's grid is search only; Tom's is api + billing",
+  leoView.rows.map((r) => r.id).join() === "search" &&
+    tomView.rows.map((r) => r.id).join() === "api,billing");
+
+// The freeze guard: a proposal against a frozen day must name the freeze.
+const fzBad = await post("oncall", {
+  seat: "ana",
+  action: "propose",
+  change: { type: "swap", a: { row: "billing", day: "2026-10-22" }, b: { row: "billing", day: "2026-10-29" } },
+  note: "family thing that week",
+});
+check("O4a freeze-day proposal without naming the freeze is refused", Boolean(fzBad.error) && /freeze/i.test(fzBad.error), JSON.stringify(fzBad));
+const fzOk = await post("oncall", {
+  seat: "ana",
+  action: "propose",
+  change: { type: "swap", a: { row: "billing", day: "2026-10-22" }, b: { row: "billing", day: "2026-10-29" } },
+  note: "Asking inside the launch freeze — family emergency, naming it plainly",
+});
+const fzRej = fzOk.ok
+  ? await post("oncall", { seat: "tom", action: "reject", proposalId: fzOk.entry.id, reason: "playtest cleanup — still the freeze" })
+  : { ok: false };
+const samAfterFz = await getJson("/api/grid?instance=oncall&seat=sam");
+check("O4b naming the freeze lets it pend; a ruling rejects it; the frozen day never moved",
+  fzOk.ok && fzRej.ok && ocCell(samAfterFz, "billing", "2026-10-22")?.value === "ana");
+
+// Swap flow: self-rule refused, the other seat's accept lands both days.
+const swBefore = await getJson("/api/grid/log?instance=oncall");
+const sw = await post("oncall", {
+  seat: "ana",
+  action: "propose",
+  change: { type: "swap", a: { row: "api", day: "2026-10-06" }, b: { row: "api", day: "2026-10-13" } },
+  note: "playtest swap",
+});
+const selfRule = await post("oncall", { seat: "ana", action: "accept", proposalId: sw.entry.id });
+const swAcc = await post("oncall", { seat: "tom", action: "accept", proposalId: sw.entry.id });
+const swAfter = await getJson("/api/grid/log?instance=oncall");
+const samAfterSw = await getJson("/api/grid?instance=oncall&seat=sam");
+check("O5 swap: author cannot self-rule; other seat accepts; both days exchange; log +2",
+  Boolean(selfRule.error) && /own proposal/.test(selfRule.error) && swAcc.ok &&
+    swAfter.length === swBefore.length + 2 &&
+    ocCell(samAfterSw, "api", "2026-10-06")?.value === "ana" &&
+    ocCell(samAfterSw, "api", "2026-10-13")?.value === "tom",
+  JSON.stringify({ selfRule, swAcc }));
+
+// Reject flow: the day stays, the reason lands in the box.
+const rj = await post("oncall", {
+  seat: "leo",
+  action: "propose",
+  change: { type: "assign", row: "search", day: "2026-10-20", to: "leo" },
+  note: "playtest: I'd rather take the 20th",
+});
+const rjRej = await post("oncall", {
+  seat: "priya",
+  action: "reject",
+  proposalId: rj.entry.id,
+  reason: "playtest: launch-drill week — I'm keeping search",
+});
+const samAfterRj = await getJson("/api/grid?instance=oncall&seat=sam");
+const cell20 = ocCell(samAfterRj, "search", "2026-10-20");
+check("O6 reject: day stays with Priya; reason retrievable in the cell's box",
+  rjRej.ok && cell20?.value === "priya" &&
+    cell20.box.history.some((h) => (h.reason ?? "").includes("launch-drill")));
+
+// The pager pull: one service, the next 72h, reflecting the record.
+// (Oct 13 now shows Tom — the O5 swap landed after the seed story.)
+const pager = await getJson("/pull?instance=oncall&seat=pager&row=api&format=json");
+check("O7a pager JSON: api only, Oct 12–14 window, holders from the fold",
+  pager.row === "api" &&
+    pager.entries.map((e) => e.date).join() === "2026-10-12,2026-10-13,2026-10-14" &&
+    pager.entries.map((e) => e.person).join() === "priya,tom,ana",
+  JSON.stringify(pager.entries));
+const pagerIcs = await get("/pull?instance=oncall&seat=pager&row=api");
+check("O7b pager .ics: timed shifts from the 09:00 handover, no other service named",
+  pagerIcs.includes("DTSTART:20261012T090000") && pagerIcs.includes("On call: api") &&
+    !pagerIcs.includes("billing") && !pagerIcs.includes("ingest"));
+
+// Re-fold per instance.
+const ocRf = await post("oncall", { seat: "sam", action: "refold" });
+check("O8 re-fold digest identical (oncall)", ocRf.identical === true && ocRf.before === ocRf.after);
+
+// The lead page: switcher, claim, primitives — no custody vocabulary in the panel.
+const lead = await get("/");
+check("O9 lead page: engine claim + primitives panel + switcher to custody",
+  lead.includes("one engine, many grids") && lead.includes("Defaults stand") &&
+    lead.includes("Pull, don't push") && lead.includes("On-call rotation") &&
+    lead.includes("/?instance=custody"));
+
+/* ================================================================== */
+
+section("");
+totals.push([sectionName, sectionPass, sectionTotal]);
+console.log("\n== totals ==");
+let allPass = 0;
+let allTotal = 0;
+for (const [name, p, t] of totals) {
+  if (!name) continue;
+  console.log(`${name}: ${p}/${t}`);
+  allPass += p;
+  allTotal += t;
+}
+console.log(`TOTAL: ${allPass}/${allTotal}${failures ? ` — ${failures} FAILURES` : " — all green"}`);
 process.exit(failures ? 1 : 0);

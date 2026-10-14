@@ -4,10 +4,12 @@ compatibility_date = "2025-10-01"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 
-# The Grid is a Durable Object (via the Agents SDK): one instance,
-# "demo", holding this instance's own append-only record in its
-# SQLite. The grid is a pure fold of the default + that record; the
-# derived grid is a cache and can be re-folded from the log alone.
+# The Grid is a Durable Object (via the Agents SDK): one object per
+# instance ("oncall", "custody"), each holding its own append-only
+# record in its SQLite. The grid is a pure fold of the instance's
+# default rule + that record; the derived grid is a cache and can
+# be re-folded from the log alone. (The first deployment's "demo"
+# object is dormant; instances are config, not code.)
 [[durable_objects.bindings]]
 name = "GRID"
 class_name = "Grid"
