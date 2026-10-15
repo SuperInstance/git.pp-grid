@@ -24,7 +24,8 @@
  *      the re-fold proof, and the record itself, in order.
  */
 
-import type { InstanceConfig } from "./engine";
+import type { DerivedGrid, InstanceConfig } from "./engine";
+import { addDays, cellKey, changeCells, fmtDay, periodDates, utcOf } from "./engine";
 import { INSTANCE_ORDER } from "./instances";
 
 const CLAIM = "One record. Every seat sees its scope. Nothing moves without a ruling.";
@@ -37,7 +38,67 @@ const PRIMITIVES = [
   ["Pull, don't push", "take your artefact away (.ics, JSON); write only through the port, as a record, under your own name."],
 ];
 
-export function renderPage(cfg: InstanceConfig, all: InstanceConfig[]): string {
+const DAY_MS = 86_400_000;
+
+function escText(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/**
+ * The FACTS snapshot — the seats' non-sensitive headline facts,
+ * server-rendered into the page as plain text. A reader who cannot
+ * (or does not) execute the client — a text-only agent, a search
+ * index, a screen reader — still meets the facts the page exists
+ * to show, without discovering the API. Generated from the SAME
+ * derived grid the API serves (deriveGrid over the raw log): no
+ * second source of truth. Deliberately headline-only: the current
+ * week's holders (single-row instances), the freeze windows, any
+ * uncovered cell in the period, and the pending proposals with
+ * their cells and authors.
+ */
+export function factsSnapshot(cfg: InstanceConfig, grid: DerivedGrid): string {
+  const name = (id: string | null): string =>
+    id == null ? "NOBODY (uncovered)" : (cfg.people[id]?.name ?? id);
+  const label = (rowId: string): string => cfg.rows.find((r) => r.id === rowId)?.label ?? rowId;
+  const lines: string[] = [];
+  if (cfg.rows.length === 1) {
+    const row = cfg.rows[0];
+    const block = Math.floor((utcOf(cfg.now) - utcOf(cfg.anchor)) / (7 * DAY_MS));
+    const start = addDays(cfg.anchor, block * 7);
+    lines.push(`This week (${fmtDay(start)} – ${fmtDay(addDays(start, 6))}), ${row.label} is with:`);
+    for (let i = 0; i < 7; i++) {
+      const d = addDays(start, i);
+      const c = grid.cells[cellKey(row.id, d)];
+      lines.push(`  ${fmtDay(d)} — ${name(c?.value ?? null)}`);
+    }
+  }
+  for (const fz of cfg.freezes) {
+    lines.push(`Freeze: ${fz.label} — ${label(fz.row)}, ${fz.from} to ${fz.to}.`);
+  }
+  for (const row of cfg.rows) {
+    for (const date of periodDates(cfg)) {
+      const c = grid.cells[cellKey(row.id, date)];
+      if (c && c.value === null) {
+        lines.push(`Uncovered: ${label(row.id)} on ${date} — nobody stands there.`);
+      }
+    }
+  }
+  const pending = Object.values(grid.proposals)
+    .filter((p) => p.status === "pending")
+    .sort((a, b) => (a.id < b.id ? -1 : 1));
+  for (const p of pending) {
+    const cells = changeCells(p.change)
+      .map((r) => `${label(r.row)} ${r.day}`)
+      .join(", ");
+    lines.push(
+      `Pending proposal ${p.id}: ${p.summary} — proposed by ${name(p.author)}` +
+        `${p.tentative ? " (tentative)" : ""}; cells: ${cells}. It is a color, not a fact, until another seat rules.`,
+    );
+  }
+  return lines.join("\n");
+}
+
+export function renderPage(cfg: InstanceConfig, all: InstanceConfig[], facts?: string): string {
   const clientCfg = {
     id: cfg.id,
     title: cfg.title,
@@ -154,6 +215,7 @@ export function renderPage(cfg: InstanceConfig, all: InstanceConfig[]): string {
     <b>The default.</b> <span id="ruletext">${cfg.ruleText}</span>
     <div class="tag" style="margin-top:6px">Silence means the default holds. Talk only happens at the delta — and the delta wears a color.</div>
   </div>
+  ${facts ? `<div class="card"><b>Facts — from the record, in plain text</b><pre id="facts">${escText(facts)}</pre></div>` : ""}
 </header>
 
 <h2>Sit in a seat — the same record, rendered for where you sit</h2>
