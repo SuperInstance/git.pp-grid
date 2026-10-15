@@ -60,7 +60,7 @@ import {
   type SeatSpec,
 } from "./engine";
 import { INSTANCES, seedFor } from "./instances";
-import { renderPage } from "./page";
+import { factsSnapshot, renderPage } from "./page";
 
 export interface Env {
   GRID: DurableObjectNamespace<Grid>;
@@ -403,7 +403,13 @@ export default {
         const id = url.searchParams.get("instance") ?? "oncall"; // the page leads with engineering
         const cfg = INSTANCES[id];
         if (!cfg) return new Response(`unknown instance ${id}`, { status: 400 });
-        return new Response(renderPage(cfg, Object.values(INSTANCES)), {
+        // The FACTS snapshot is folded from the instance's own log,
+        // through the same deriveGrid the API serves — the page's
+        // plain text and the seats' projections share one truth.
+        const stub = await getAgentByName(env.GRID, id);
+        const log = await stub.rawLog(id);
+        const facts = factsSnapshot(cfg, deriveGrid(cfg, log));
+        return new Response(renderPage(cfg, Object.values(INSTANCES), facts), {
           headers: { "content-type": "text/html; charset=utf-8" },
         });
       }

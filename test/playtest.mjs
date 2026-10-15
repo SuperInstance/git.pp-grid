@@ -447,6 +447,30 @@ check("F7 served page: every script block parses as JS",
   allScripts.length === 3 && parseFailures === 0, `${parseFailures} unparsable block(s)`);
 
 /* ================================================================== */
+/* SSR FACTS — the headline facts are IN the served HTML              */
+/* ================================================================== */
+
+section("ssr facts (plain-text snapshot in the page)");
+
+// A text-only arrival reads the page shell and nothing else: the
+// custody names, the pending cell, and the freeze window must be
+// there without JS and without finding /api/grid.
+const custodyPage = await get("/?instance=custody");
+check("S1 custody page shell: 'Jonas' and 'Mara' occur in the served HTML (were 0 in wave 2)",
+  custodyPage.includes("Jonas") && custodyPage.includes("Mara"));
+check("S2 custody snapshot: the pending proposal's cell + id are in the page (2026-10-26, seed-09)",
+  custodyPage.includes("2026-10-26") && custodyPage.includes("seed-09"));
+check("S3 custody snapshot: the current week names its holders (week of Fri 2026-10-09, Oct 12 with Mara)",
+  custodyPage.includes("This week (Fri 2026-10-09") && custodyPage.includes("Mon 2026-10-12 — Mara"),
+  custodyPage.slice(custodyPage.indexOf("This week"), custodyPage.indexOf("This week") + 400));
+const oncallPage = await get("/");
+check("S4 on-call snapshot: the freeze dates string is in the page (2026-10-19 to 2026-10-23)",
+  oncallPage.includes("2026-10-19") && oncallPage.includes("2026-10-23") &&
+    oncallPage.includes("Billing v2 launch freeze"));
+check("S5 on-call snapshot: the uncovered day is in the page (search, 2026-10-31)",
+  oncallPage.includes("Uncovered: search on 2026-10-31"));
+
+/* ================================================================== */
 
 section("");
 totals.push([sectionName, sectionPass, sectionTotal]);
