@@ -205,6 +205,7 @@ export function renderPage(cfg: InstanceConfig, all: InstanceConfig[], facts?: s
     <p>${cfg.intro}</p>
     <p class="tag">${cfg.demoNote}</p>
   </div>
+  ${facts ? `<div class="card"><b>Facts — from the record, in plain text</b><pre id="facts">${escText(facts)}</pre></div>` : ""}
   <div class="card">
     <b>The engine, in five lines</b>
     <div class="prims" style="margin-top:8px">
@@ -215,7 +216,6 @@ export function renderPage(cfg: InstanceConfig, all: InstanceConfig[], facts?: s
     <b>The default.</b> <span id="ruletext">${cfg.ruleText}</span>
     <div class="tag" style="margin-top:6px">Silence means the default holds. Talk only happens at the delta — and the delta wears a color.</div>
   </div>
-  ${facts ? `<div class="card"><b>Facts — from the record, in plain text</b><pre id="facts">${escText(facts)}</pre></div>` : ""}
 </header>
 
 <h2>Sit in a seat — the same record, rendered for where you sit</h2>
