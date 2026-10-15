@@ -469,6 +469,16 @@ check("S4 on-call snapshot: the freeze dates string is in the page (2026-10-19 t
     oncallPage.includes("Billing v2 launch freeze"));
 check("S5 on-call snapshot: the uncovered day is in the page (search, 2026-10-31)",
   oncallPage.includes("Uncovered: search on 2026-10-31"));
+// Placement (D5): the snapshot moved to immediately after the header/
+// intro, so a linear text reader meets the facts before the page
+// chrome (the explainer cards, the seat bar, the grid). Guard the
+// ordering in served bytes: facts offset < grid-table mount offset.
+const custodyBytes = Buffer.from(custodyPage, "utf8");
+const factsOff = custodyBytes.indexOf('id="facts"');
+const gridOff = custodyBytes.indexOf('id="main"');
+check("S6 facts placement: the facts block's byte offset is earlier than the grid table's",
+  factsOff !== -1 && gridOff !== -1 && factsOff < gridOff,
+  `facts@${factsOff} grid@${gridOff}`);
 
 /* ================================================================== */
 
