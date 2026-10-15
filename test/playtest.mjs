@@ -20,6 +20,8 @@
  *     re-fold per instance.
  */
 
+import vm from "node:vm";
+
 const BASE = process.env.GRID_URL ?? "https://gitpp-grid.casey-digennaro.workers.dev";
 
 let failures = 0;
@@ -378,6 +380,71 @@ check("O9 lead page: engine claim + primitives panel + switcher to custody",
   lead.includes("one engine, many grids") && lead.includes("Defaults stand") &&
     lead.includes("Pull, don't push") && lead.includes("On-call rotation") &&
     lead.includes("/?instance=custody"));
+
+/* ================================================================== */
+/* FACE — reasons & notes on the face itself; counter discoverability  */
+/* ================================================================== */
+
+section("face (reasons on the face, counter affordance)");
+
+// Render a cell's FACE with the page's own cellHtml, taken from the
+// served page's first script and run against the live seat payload.
+// The face is what a 30-second reader sees without a click: if the
+// reason text only exists in the cell's box, this HTML won't have it.
+async function faceHtml(instance, seat, rowId, date) {
+  const pageHtml = await get(instance === "oncall" ? "/" : `/?instance=${instance}`);
+  const scripts = [...pageHtml.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+  const ctx = vm.createContext({ console });
+  vm.runInContext(scripts[0], ctx); // CFG + helpers + cellHtml; no DOM calls at top level
+  const view = await getJson(`/api/grid?instance=${instance}&seat=${seat}`);
+  const cell = view.rows.find((r) => r.id === rowId)?.cells.find((c) => c.date === date);
+  ctx.__cell = cell;
+  return vm.runInContext(`cellHtml(${JSON.stringify(rowId)}, __cell)`, ctx);
+}
+
+const faceBilling = await faceHtml("oncall", "sam", "billing", "2026-10-21");
+check("F1 on-call face: the rejected billing swap's reason is ON the face (no click)",
+  faceBilling.includes("face-reason") && faceBilling.includes("That's the launch freeze"),
+  faceBilling.slice(0, 300));
+
+const faceIngest = await faceHtml("oncall", "sam", "ingest", "2026-10-24");
+check("F2 on-call face: the open coverage ask's note is ON the face",
+  faceIngest.includes("face-note") && faceIngest.includes("Coverage ask"),
+  faceIngest.slice(0, 300));
+
+const faceHalloween = await faceHtml("custody", "mara", "kid", "2026-10-31");
+check("F3 custody face: the Halloween rejection reason is ON the face (no click)",
+  faceHalloween.includes("face-reason") && faceHalloween.includes("Hosting my parents that weekend"),
+  faceHalloween.slice(0, 300));
+
+const faceOct26 = await faceHtml("custody", "mara", "kid", "2026-10-26");
+check("F4 custody face: the open Oct 26 proposal's note is ON the face",
+  faceOct26.includes("face-note") && faceOct26.includes("waiting to hear back from the market"),
+  faceOct26.slice(0, 300));
+
+check("F5 cold-reader grep of the rendered face HTML finds both reason strings",
+  faceBilling.includes("launch freeze") && faceHalloween.includes("Hosting my parents that weekend"));
+
+const leadPage = await get("/");
+const counterButtons = leadPage.split("Counter — propose a different change").length - 1;
+check("F6 counter affordance: action rows (inbox + cell box) carry the explaining Counter button; the port names the counter-proposal",
+  counterButtons >= 2 && leadPage.includes("counter-proposal — answer a pending proposal"),
+  `counter button occurrences: ${counterButtons}`);
+
+// The page is only a page if its scripts parse: every block of the
+// served page must compile as JS (a template-escape slip here once
+// killed the whole client silently — fetch-based checks can't see it).
+const allScripts = [...leadPage.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+let parseFailures = 0;
+for (const s of allScripts) {
+  try {
+    new vm.Script(s);
+  } catch {
+    parseFailures++;
+  }
+}
+check("F7 served page: every script block parses as JS",
+  allScripts.length === 3 && parseFailures === 0, `${parseFailures} unparsable block(s)`);
 
 /* ================================================================== */
 

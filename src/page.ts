@@ -104,6 +104,9 @@ export function renderPage(cfg: InstanceConfig, all: InstanceConfig[]): string {
   .cell .moved { position: absolute; top: 6px; right: 8px; font-size: 10px; color: #8b949e; }
   .cell .pend { position: absolute; left: 0; right: 0; bottom: 0; font-size: 10.5px; padding: 2px 8px;
     background: repeating-linear-gradient(45deg, rgba(227,179,65,.35) 0 6px, rgba(227,179,65,.12) 6px 12px); color: #f0d48a; }
+  .cell .face { font-size: 11px; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cell .face-reason { color: #f0a35e; }
+  .cell .face-note { color: #f0d48a; }
   .blank { border: 1px dashed #21262d; border-radius: 8px; min-height: 74px; }
   .legend { font-size: 12px; color: #8b949e; }
   .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; vertical-align: -1px; margin: 0 3px 0 8px; }
@@ -174,7 +177,7 @@ export function renderPage(cfg: InstanceConfig, all: InstanceConfig[]): string {
 <h2>Open a cell — the description and the equation</h2>
 <div class="card" id="box"><span class="tag">Click any cell in a full-grid seat. Its default, what stands now, any freeze, every record that touched it — rejected ones struck through, reasons attached. A cell that can explain itself.</span></div>
 
-<h2>The port — propose, and rule on what's pending</h2>
+<h2>The port — propose, counter-propose, and rule on what's pending</h2>
 <div class="card" id="port">
   <div class="tag" id="acting"></div>
   <label>kind of proposal
@@ -189,9 +192,9 @@ export function renderPage(cfg: InstanceConfig, all: InstanceConfig[]): string {
     <input id="pnote" style="width:100%" placeholder="e.g. conference Monday — trade?">
   </label>
   <label style="display:inline-block"><input type="checkbox" id="ptent"> tentative — I'm not sure yet</label>
-  <label style="display:inline-block"><input type="checkbox" id="pcounter"> this is a counter to proposal <input id="pcounterid" size="8" placeholder="e-0007"></label>
+  <label style="display:inline-block"><input type="checkbox" id="pcounter"> counter-proposal — answer a pending proposal with a different change of your own, instead of accepting or rejecting it: counter to proposal <input id="pcounterid" size="8" placeholder="e-0007"></label>
   <div class="bar"><button id="propose">Propose</button><span class="tag" id="pmsg"></span></div>
-  <div class="tag">Pushes only happen here, as records, under your name. Rejecting another seat's proposal takes a reason — you'll be asked, and it stays attached forever. You cannot rule on your own proposal.</div>
+  <div class="tag">Pushes only happen here, as records, under your name. Rejecting another seat's proposal takes a reason — you'll be asked, and it stays attached forever. You cannot rule on your own proposal. To counter a proposal: use the “Counter — propose a different change” button on any pending proposal (in your inbox, or in its cell) — it brings you here with the proposal's id filled in; set the different change above, add a note, and Propose records it as a counter.</div>
 </div>
 
 <h2>Pull &amp; proof — artefacts out, and the re-fold</h2>
@@ -301,9 +304,9 @@ function renderInbox() {
     h += '<div class="card ding' + (it.type === "resolved-yours" ? " res" : "") + '">' + esc(it.text);
     if (it.type === "pending-yours" && it.proposalId) {
       h += '<div class="bar" style="margin:6px 0 0">' +
-        '<button onclick="rule(\'accept\',\'' + it.proposalId + '\')">Accept</button>' +
-        '<button onclick="rule(\'reject\',\'' + it.proposalId + '\')">Reject…</button>' +
-        '<button onclick="prefillCounter(\'' + it.proposalId + '\')">Counter</button></div>';
+        '<button onclick="rule(\\'accept\\',\\'' + it.proposalId + '\\')">Accept</button>' +
+        '<button onclick="rule(\\'reject\\',\\'' + it.proposalId + '\\')">Reject…</button>' +
+        '<button onclick="prefillCounter(\\'' + it.proposalId + '\\')" title="Answer this proposal with a different change of your own — it goes to the port below, with this proposal\\'s id filled in">Counter — propose a different change</button></div>';
     }
     h += "</div>";
   });
@@ -322,14 +325,36 @@ function renderFeed() {
   box.innerHTML = h || '<span class="tag">The record is empty.</span>';
 }
 
+function faceReason(c) {
+  // The latest settlement reason touching this cell, from the history
+  // the payload already carries (the box's equation). Shown on the
+  // face: a 30-second reader gets the reason without opening the cell.
+  var hist = (c.box && c.box.history) || [];
+  for (var i = hist.length - 1; i >= 0; i--) {
+    if (hist[i].reason) return hist[i].reason;
+  }
+  return null;
+}
+
+function faceNote(c) {
+  // The latest still-open proposal's note on this cell, if any.
+  if (!c.pending || !c.pending.length) return null;
+  var p = c.pending[c.pending.length - 1];
+  return p && p.note ? p.note : null;
+}
+
 function cellHtml(rowId, c) {
   var cls = "cell" + (c.date === CFG.now ? " today" : "") + (c.value == null ? " gap" : "") + (c.freeze ? " frozen" : "");
   var bg = c.value == null ? "" : ' style="background:' + pcolor(c.value) + '2b"';
-  var h = '<div class="' + cls + '"' + bg + ' onclick="openBox(\'' + rowId + "','" + c.date + '\')">';
+  var h = '<div class="' + cls + '"' + bg + ' onclick="openBox(\\'' + rowId + "','" + c.date + '\\')">';
   h += '<span class="num">' + Number(c.date.slice(8)) + "</span>";
   if (c.value !== c.defaultValue) h += '<span class="moved">◦ moved</span>';
   h += '<div class="who">' + (c.value == null ? "⚠ UNCOVERED" : esc(pname(c.value))) + (c.freeze ? " 🔒" : "") + "</div>";
   c.events.forEach(function (ev) { h += '<div class="ev">▸ ' + esc(ev.title) + (ev.time ? " " + esc(ev.time) : "") + "</div>"; });
+  var fr = faceReason(c);
+  if (fr) h += '<div class="face face-reason" title="' + esc(fr) + '">✕ rejected — ' + esc(fr) + "</div>";
+  var fn = faceNote(c);
+  if (fn) h += '<div class="face face-note" title="' + esc(fn) + '">◌ proposed — ' + esc(fn) + "</div>";
   if (c.pending && c.pending.length) h += '<div class="pend">◌ ' + c.pending.length + " pending</div>";
   return h + "</div>";
 }
@@ -371,7 +396,7 @@ function renderEvents() {
 
 function renderAggregate() {
   var h = "<h2>Coverage by row — aggregates only</h2>";
-  h += '<div class="tag" style="margin-bottom:8px">This seat\'s payload contains no names, no notes, no history — only coverage, gaps and pending counts. That is what the office schedules from.</div>';
+  h += '<div class="tag" style="margin-bottom:8px">This seat\\'s payload contains no names, no notes, no history — only coverage, gaps and pending counts. That is what the office schedules from.</div>';
   h += '<div class="card"><table class="agg"><tr><th>row</th><th>covered</th><th>gaps</th><th>pending</th><th>status</th></tr>';
   view.rows.forEach(function (r) {
     h += "<tr><td>" + esc(r.label) + "</td><td>" + r.covered + " / " + r.total + "</td><td>" +
@@ -412,22 +437,22 @@ function openBox(rowId, date) {
   b.events.forEach(function (ev) {
     h += '<div class="hist">▸ ' + esc(ev.title) + (ev.time ? " at " + esc(ev.time) : "") +
       ' <span class="tag">(' + esc(ev.kind) + (ev.for ? ", " + esc(pname(ev.for)) : "") + ")</span>";
-    if (view.view === "grid") h += ' <button onclick="optin(\'' + date + "','" + esc(ev.title).replace(/'/g, "\\'") + "','" + rowId + '\')">remind me</button>';
+    if (view.view === "grid") h += ' <button onclick="optin(\\'' + date + "','" + esc(ev.title).replace(/'/g, "\\'") + "','" + rowId + '\\')">remind me</button>';
     h += "</div>";
   });
   b.pending.forEach(function (p) {
     h += '<div class="card ding"><span class="kind proposal">pending</span> ' + esc(p.summary) + " — proposed by " + esc(pname(p.author)) +
       (p.tentative ? " (tentative)" : "") + (p.note ? '<br><span class="tag">“' + esc(p.note) + '”</span>' : "");
     if (p.author !== view.person) {
-      h += '<div class="bar" style="margin:6px 0 0"><button onclick="rule(\'accept\',\'' + p.id + '\')">Accept</button>' +
-        '<button onclick="rule(\'reject\',\'' + p.id + '\')">Reject…</button>' +
-        '<button onclick="prefillCounter(\'' + p.id + '\')">Counter</button></div>';
+      h += '<div class="bar" style="margin:6px 0 0"><button onclick="rule(\\'accept\\',\\'' + p.id + '\\')">Accept</button>' +
+        '<button onclick="rule(\\'reject\\',\\'' + p.id + '\\')">Reject…</button>' +
+        '<button onclick="prefillCounter(\\'' + p.id + '\\')" title="Answer this proposal with a different change of your own — it goes to the port below, with this proposal\\'s id filled in">Counter — propose a different change</button></div>';
     } else h += '<div class="tag">Yours — it waits for another seat to rule.</div>';
     h += "</div>";
   });
   h += '<div style="margin-top:8px"><input id="bq" placeholder="ask a question or comment on this cell…" style="width:70%">' +
-    ' <button onclick="boxSay(\'' + rowId + "','" + date + '\',\'question\')">Ask</button>' +
-    ' <button onclick="boxSay(\'' + rowId + "','" + date + '\',\'comment\')">Comment</button></div>';
+    ' <button onclick="boxSay(\\'' + rowId + "','" + date + '\\',\\'question\\')">Ask</button>' +
+    ' <button onclick="boxSay(\\'' + rowId + "','" + date + '\\',\\'comment\\')">Comment</button></div>';
   h += "<h2 style='margin-top:14px'>The equation — every record that touched this cell</h2>";
   if (!b.history.length) h += '<span class="tag">Nothing has touched this cell. The default is the whole story.</span>';
   b.history.forEach(function (x) {
@@ -455,7 +480,9 @@ async function rule(action, pid) {
 function prefillCounter(pid) {
   $("pcounter").checked = true;
   $("pcounterid").value = pid;
+  $("pmsg").textContent = "Countering " + pid + " — set the different change above, add a note, then Propose: it is recorded as a counter to " + pid + ".";
   $("port").scrollIntoView({ behavior: "smooth" });
+  $("pnote").focus();
 }
 
 async function boxSay(rowId, date, kind) {
